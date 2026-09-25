@@ -1,0 +1,18 @@
+# Runtime configuration. Every key is editable from the dashboard and re-read every loop.
+# Secrets never go here; they live in .env.
+
+ENABLED = true
+DRY_RUN = true                 # true: log the feed instead of opening the feeder. POC default.
+ACTIVE_START = "21:00"        # local time, may cross midnight
+ACTIVE_END = "06:00"
+MIN_GAP_MIN = 60              # minimum minutes between two lid opens
+LEAVE_TIMEOUT_S = 120         # close after Grrr has been gone this long
+FEEDING_MAX_MIN = 15          # close no matter what after this long
+FEEDING_POLL_S = 20           # LLM cadence while the lid is open
+CONFIRMATIONS_REQUIRED = 3    # consecutive Grrr verdicts before opening
+GRRR_MIN_CONF = 0.8
+MOTION_PIXEL_FRACTION = 0.02  # fraction of changed pixels that counts as motion
+MOTION_HOLD_S = 20            # WATCHING -> IDLE after this long without motion
+LLM_MIN_INTERVAL_S = 3
+HEARTBEAT_MIN = 5
+LLM_MODEL = "claude-opus-5"

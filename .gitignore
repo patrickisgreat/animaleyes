@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+.coverage
+data/db/*.sqlite*
+data/frames/*.jpg
+data/captures/*.jpg
+petlibro-cli/.env
+petlibro-cli/.venv/
+.toolkit/
+config/

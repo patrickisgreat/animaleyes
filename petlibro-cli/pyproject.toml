@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "petlibro-cli"
+version = "0.1.0"
+description = "Minimal standalone CLI for PetLibro feeders (no Home Assistant)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["httpx>=0.24"]
+
+[project.scripts]
+petlibro-cli = "petlibro_cli:main"
+
+[tool.setuptools]
+py-modules = ["petlibro_cli"]

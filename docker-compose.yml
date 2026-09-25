@@ -1,0 +1,22 @@
+services:
+  animaleyes:
+    build: .
+    container_name: animaleyes
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config          # config.toml, editable from the dashboard
+      - ./data:/app/data              # reference photos in, SQLite + frames + captures out
+      - petlibro-token:/root/.petlibro-cli   # petlibro-cli login cache survives rebuilds
+    environment:
+      - TZ=${TZ:-America/Chicago}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request;urllib.request.urlopen('http://localhost:8080/api/status?token='+os.environ['DASH_TOKEN'])\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  petlibro-token:
