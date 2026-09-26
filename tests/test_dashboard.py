@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets as secrets_lib
 from datetime import datetime
 
 from fastapi.testclient import TestClient
@@ -9,6 +10,9 @@ from animaleyes.camera import Frame, FrameBuffer
 from animaleyes.config import Secrets
 from animaleyes.dashboard import create_app, mjpeg
 from tests.conftest import Harness
+
+# Generated per run so no credential-looking literal lives in the repo.
+PASSWORD = secrets_lib.token_urlsafe(16)
 
 
 def client(h: Harness) -> TestClient:
@@ -20,12 +24,12 @@ def client(h: Harness) -> TestClient:
         petlibro_serial="",
         slack_webhook="",
         dash_user="me",
-        dash_password="s3cret",
+        dash_password=PASSWORD,
         dash_public_url="http://dash",
     )
     app = create_app(h.machine, h.store, h.config, secrets, h.tmp_path / "frames")
     c = TestClient(app)
-    c.auth = ("me", "s3cret")
+    c.auth = ("me", PASSWORD)
     return c
 
 
@@ -47,7 +51,7 @@ def test_every_route_requires_basic_auth(h: Harness) -> None:
         assert r.status_code == 401
         assert r.headers["www-authenticate"].startswith("Basic")
         assert c.get(path, auth=("me", "wrong")).status_code == 401
-        assert c.get(path, auth=("you", "s3cret")).status_code == 401
+        assert c.get(path, auth=("you", PASSWORD)).status_code == 401
     assert c.get("/").status_code == 200
     assert c.get("/healthz", auth=None).json() == {"ok": True}
 

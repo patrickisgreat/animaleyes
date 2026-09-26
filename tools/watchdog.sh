@@ -7,8 +7,9 @@
 set -euo pipefail
 
 : "${DASH_URL:?set DASH_URL}"
-: "${DASH_USER:?set DASH_USER}"
-: "${DASH_PASSWORD:?set DASH_PASSWORD}"
+for var in DASH_USER DASH_PASSWORD; do
+  [ -n "${!var:-}" ] || { echo "set $var" >&2; exit 1; }
+done
 : "${SLACK_WEBHOOK:?set SLACK_WEBHOOK}"
 STALE_S="${STALE_S:-600}"
 
