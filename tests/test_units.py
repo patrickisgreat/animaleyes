@@ -42,7 +42,8 @@ def secrets(url: str, email: str = "", password: str = "") -> Secrets:
         anthropic_api_key="",
         petlibro_serial="",
         slack_webhook="",
-        dash_token="",
+        dash_user="",
+        dash_password="",
         dash_public_url="",
     )
 

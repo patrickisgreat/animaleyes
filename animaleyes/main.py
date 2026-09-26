@@ -75,7 +75,6 @@ def build(secrets: Secrets) -> tuple[Machine, Camera, ConfigStore, Store, Claude
         clock=datetime.now,
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
-        dash_token=secrets.dash_token,
     )
     return machine, camera, config, store, llm
 
@@ -100,8 +99,8 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     secrets = Secrets.from_env()
-    if not secrets.dash_token:
-        raise SystemExit("DASH_TOKEN must be set")
+    if not (secrets.dash_user and secrets.dash_password):
+        raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
     machine, camera, config, store, llm = build(secrets)
     if secrets.kasa_stream_url:
         camera.start()

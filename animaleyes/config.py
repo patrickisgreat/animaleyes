@@ -96,7 +96,8 @@ class Secrets:
     anthropic_api_key: str
     petlibro_serial: str
     slack_webhook: str
-    dash_token: str
+    dash_user: str
+    dash_password: str
     dash_public_url: str
 
     @classmethod
@@ -109,6 +110,7 @@ class Secrets:
             anthropic_api_key=env("ANTHROPIC_API_KEY", ""),
             petlibro_serial=env("PETLIBRO_SERIAL", ""),
             slack_webhook=env("SLACK_WEBHOOK", ""),
-            dash_token=env("DASH_TOKEN", ""),
-            dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8080").rstrip("/"),
+            dash_user=env("DASH_USER", ""),
+            dash_password=env("DASH_PASSWORD", ""),
+            dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8081").rstrip("/"),
         )

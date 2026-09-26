@@ -1,22 +1,48 @@
-"""Single-page dashboard. No build step; the page polls JSON and a JPEG every 3 seconds.
+"""Single-page dashboard. No build step; the page polls JSON every 3 seconds and shows the
+camera as an MJPEG stream.
 
-Every route requires ?token=DASH_TOKEN. Controls write config.toml or set flags the state
-machine consumes on its next tick; the dashboard never talks to the feeder itself.
+Every route except /healthz requires HTTP basic auth (DASH_USER / DASH_PASSWORD). It is
+served on loopback only and reached through Cloudflare Tunnel or Tailscale Serve, both of
+which terminate TLS, so the password never crosses a network in the clear. Controls write
+config.toml or set flags the state machine consumes on its next tick; the dashboard never
+talks to the feeder itself.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import secrets as secrets_lib
+import time
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from .camera import FrameBuffer
 from .config import ConfigStore, Secrets
 from .machine import Machine
 from .store import Store
+
+# Module level so FastAPI can resolve the annotation (this file uses postponed annotations).
+Credentials = Annotated[
+    HTTPBasicCredentials | None, Depends(HTTPBasic(auto_error=False, realm="animaleyes"))
+]
+
+STREAM_POLL_S = 0.1
+# The page reconnects when a stream ends, so a tab left open on a phone cannot hold a
+# connection through the tunnel forever.
+STREAM_MAX_S = 600
 
 MAIN_EVENT_KINDS = (
     "open",
@@ -45,15 +71,35 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
 
-    def auth(token: str = Query(default="")) -> None:
-        if not secrets.dash_token or token != secrets.dash_token:
-            raise HTTPException(status_code=401, detail="bad token")
+    def auth(credentials: Credentials) -> None:
+        # Fail closed: with no password configured, nobody gets in.
+        ok = (
+            bool(secrets.dash_password)
+            and credentials is not None
+            and secrets_lib.compare_digest(
+                credentials.username.encode(), secrets.dash_user.encode()
+            )
+            and secrets_lib.compare_digest(
+                credentials.password.encode(), secrets.dash_password.encode()
+            )
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=401,
+                detail="login required",
+                headers={"WWW-Authenticate": 'Basic realm="animaleyes"'},
+            )
 
     guarded = [Depends(auth)]
 
+    @app.get("/healthz")
+    def healthz() -> dict[str, bool]:
+        """Unauthenticated liveness for the container healthcheck. Reveals nothing."""
+        return {"ok": True}
+
     @app.get("/", response_class=HTMLResponse, dependencies=guarded)
-    def index(token: str) -> str:
-        return PAGE.replace("__TOKEN__", token)
+    def index() -> str:
+        return PAGE
 
     @app.get("/api/status", dependencies=guarded)
     def status() -> dict[str, Any]:
@@ -137,19 +183,28 @@ def create_app(
             content=frames[0].jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"}
         )
 
+    @app.get("/stream.mjpg", dependencies=guarded)
+    def stream() -> StreamingResponse:
+        # Read-only view of the frames the camera thread already decodes; it opens no new
+        # connection to the camera. POC: runs at the ingest rate (~2 fps), which motion
+        # detection is tuned for.
+        return StreamingResponse(
+            mjpeg(machine.frames),
+            media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/api/events", dependencies=guarded)
     def events(all: bool = False, limit: int = 100) -> JSONResponse:
         rows = store.events(limit=limit, kinds=None if all else MAIN_EVENT_KINDS)
         return JSONResponse([_event_json(e) for e in rows])
 
     @app.get("/events/{event_id}", response_class=HTMLResponse, dependencies=guarded)
-    def event_page(event_id: int, token: str) -> str:
+    def event_page(event_id: int) -> str:
         event = store.event(event_id)
         if not event:
             raise HTTPException(status_code=404)
-        images = "".join(
-            f'<img src="/frames/{name}?token={token}" alt="{name}">' for name in event.frames
-        )
+        images = "".join(f'<img src="/frames/{name}" alt="{name}">' for name in event.frames)
         return EVENT_PAGE.format(
             id=event.id,
             at=event.at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -157,7 +212,6 @@ def create_app(
             reason=_escape(event.reason),
             data=_escape(json.dumps(event.data, indent=2)),
             images=images,
-            token=token,
         )
 
     @app.get("/frames/{name}", dependencies=guarded)
@@ -168,6 +222,29 @@ def create_app(
         return FileResponse(path, media_type="image/jpeg")
 
     return app
+
+
+MJPEG_BOUNDARY = "frame"
+
+
+async def mjpeg(
+    frames: FrameBuffer, poll_s: float = STREAM_POLL_S, max_s: float = STREAM_MAX_S
+) -> AsyncIterator[bytes]:
+    """Yield each new frame in the buffer as one multipart/x-mixed-replace part."""
+    deadline = time.monotonic() + max_s
+    last_at: datetime | None = None
+    while time.monotonic() < deadline:
+        latest = frames.latest(1)
+        if latest and latest[0].at != last_at:
+            last_at = latest[0].at
+            jpeg = latest[0].jpeg
+            yield (
+                f"--{MJPEG_BOUNDARY}\r\nContent-Type: image/jpeg\r\n"
+                f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+                + jpeg
+                + b"\r\n"
+            )
+        await asyncio.sleep(poll_s)
 
 
 def _age(iso: str | None, now: datetime) -> int | None:
@@ -234,8 +311,9 @@ PAGE = """<!doctype html>
 </div>
 
 <div class="card overlay">
-  <img id="live" alt="latest frame">
+  <img id="live" alt="live camera">
   <pre id="verdict"></pre>
+  <button class="plain" id="liveBtn" onclick="toggleLive()">Pause live</button>
 </div>
 
 <div class="card">
@@ -258,8 +336,7 @@ PAGE = """<!doctype html>
 </div>
 
 <script>
-const T = "__TOKEN__";
-const q = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(T);
+const q = (p) => p;
 const CONTROLS = [
   ["ENABLED","bool"],["DRY_RUN","bool"],["ACTIVE_START","text"],["ACTIVE_END","text"],
   ["MIN_GAP_MIN","number"],["LEAVE_TIMEOUT_S","number"],["FEEDING_MAX_MIN","number"],
@@ -291,7 +368,7 @@ async function refresh() {
   document.getElementById("status").innerHTML = rows.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
   document.getElementById("verdict").textContent = s.last_verdict
     ? (s.last_llm_at || "") + "\\n" + JSON.stringify(s.last_verdict) : "no LLM verdict yet";
-  document.getElementById("live").src = q("/frame.jpg") + "&t=" + Date.now();
+  if (!live) document.getElementById("live").src = "/frame.jpg?t=" + Date.now();
   if (!Object.keys(plates).length) { plates = s.plates; renderPlates(); }
 }
 function renderPlates() {
@@ -331,6 +408,19 @@ async function loadEvents() {
     `<div class="ev"><span class="when">${e.at.replace("T"," ")}</span> <a href="${q("/events/"+e.id)}"><span class="kind">${e.kind}</span></a> ${e.reason}` +
     (e.frames.length ? ` <a href="${q("/events/"+e.id)}">[${e.frames.length} frames]</a>` : "") + `</div>`).join("") || "<small>no events yet</small>";
 }
+// Live view: an MJPEG stream while playing, a still refreshed with the status while paused.
+// Phones drop the stream when the tab is backgrounded, and the server ends it every 10
+// minutes, so reconnect on error and whenever the page becomes visible again.
+let live = true;
+function startLive() { document.getElementById("live").src = "/stream.mjpg?t=" + Date.now(); }
+function toggleLive() {
+  live = !live;
+  document.getElementById("liveBtn").textContent = live ? "Pause live" : "Resume live";
+  if (live) startLive(); else refresh();
+}
+document.getElementById("live").onerror = () => { if (live) setTimeout(startLive, 3000); };
+document.addEventListener("visibilitychange", () => { if (live && !document.hidden) startLive(); });
+startLive();
 refresh(); loadConfig(); loadEvents();
 setInterval(refresh, 3000); setInterval(loadEvents, 15000);
 </script></body></html>
@@ -341,7 +431,7 @@ EVENT_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>body{{background:#111;color:#eee;font:16px system-ui,sans-serif;padding:12px}}
 img{{width:100%;border-radius:8px;margin:6px 0}}pre{{background:#1c1c1c;padding:10px;border-radius:8px;white-space:pre-wrap}}
 a{{color:#6aa9ff}}</style></head><body>
-<a href="/?token={token}">&larr; dashboard</a>
+<a href="/">&larr; dashboard</a>
 <h2>{kind} <small>#{id} · {at}</small></h2>
 <p>{reason}</p>
 <pre>{data}</pre>

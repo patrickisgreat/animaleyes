@@ -61,7 +61,6 @@ class Machine:
         clock: Callable[[], datetime],
         frames_dir: Path,
         dashboard_url: str = "",
-        dash_token: str = "",
     ):
         self.config = config
         self.store = store
@@ -74,7 +73,6 @@ class Machine:
         self.clock = clock
         self.frames_dir = frames_dir
         self.dashboard_url = dashboard_url
-        self.dash_token = dash_token
         self.verdicts: deque[Verdict] = deque(maxlen=VERDICT_HISTORY)
         self.last_verdict: Verdict | FeedingVerdict | None = None
         self.last_llm_at: datetime | None = None
@@ -406,10 +404,9 @@ class Machine:
         return names
 
     def _notify(self, text: str, event_id: int | None = None) -> None:
-        # The link carries the dashboard token so it opens straight from the phone.
-        # Acceptable for a private Slack workspace; v1 should use a session cookie instead.
+        # No credentials in the link; the browser asks for the dashboard's basic auth.
         if event_id and self.dashboard_url:
-            text = f"{text}\n{self.dashboard_url}/events/{event_id}?token={self.dash_token}"
+            text = f"{text}\n{self.dashboard_url}/events/{event_id}"
         self.notifier.send(text)
 
     def _check_camera(self, now: datetime) -> None:
