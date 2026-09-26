@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
-import hashlib
 import ipaddress
 import logging
 import socket
@@ -59,9 +58,11 @@ class FrameBuffer:
 
 
 def kasa_legacy_password(password: str) -> str:
-    """Older Kasa cameras want base64(sha256(account password)) as the basic-auth password."""
-    digest = hashlib.sha256(password.encode("utf-8")).digest()
-    return base64.b64encode(digest).decode("ascii")
+    """Kasa cameras want base64(account password) as the basic-auth password.
+
+    Matches go2rtc's kasa source (`secret1` -> `c2VjcmV0MQ==`), tested there on EC71.
+    """
+    return base64.b64encode(password.encode("utf-8")).decode("ascii")
 
 
 def arp_lookup(mac: str, arp_table: Path = Path("/proc/net/arp")) -> str | None:

@@ -65,10 +65,8 @@ def test_ffmpeg_command_legacy_kasa_uses_basic_auth_with_hashed_password() -> No
     cmd = build_ffmpeg_command(secrets("https://cam:19443/https/stream/mixed", "me@x.com", "pw"))
     header = cmd[cmd.index("-headers") + 1]
     assert header.startswith("Authorization: Basic ")
-    import base64
-    import hashlib
 
-    assert kasa_legacy_password("pw") == base64.b64encode(hashlib.sha256(b"pw").digest()).decode()
+    assert kasa_legacy_password("secret1") == "c2VjcmV0MQ=="  # go2rtc's documented example
 
 
 def test_changed_fraction_zero_for_identical_and_one_for_inverted() -> None:
