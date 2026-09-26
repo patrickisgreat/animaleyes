@@ -99,6 +99,7 @@ class Secrets:
     dash_user: str
     dash_password: str
     dash_public_url: str
+    kasa_camera_mac: str = ""
 
     @classmethod
     def from_env(cls) -> Secrets:
@@ -113,4 +114,5 @@ class Secrets:
             dash_user=env("DASH_USER", ""),
             dash_password=env("DASH_PASSWORD", ""),
             dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8081").rstrip("/"),
+            kasa_camera_mac=env("KASA_CAMERA_MAC", ""),
         )

@@ -8,8 +8,11 @@ Python. If ffmpeg dies or the camera goes away we restart it with backoff.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
+import ipaddress
 import logging
+import socket
 import subprocess
 import threading
 import time
@@ -17,6 +20,8 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from .config import Secrets
 
@@ -59,9 +64,66 @@ def kasa_legacy_password(password: str) -> str:
     return base64.b64encode(digest).decode("ascii")
 
 
+def arp_lookup(mac: str, arp_table: Path = Path("/proc/net/arp")) -> str | None:
+    """IPv4 address the kernel currently maps to `mac`, if any."""
+    for line in arp_table.read_text().splitlines()[1:]:
+        fields = line.split()
+        # IP address, HW type, Flags, HW address, Mask, Device. Flags 0x0 is an incomplete entry.
+        if len(fields) >= 4 and fields[3].lower() == mac.lower() and fields[2] != "0x0":
+            return fields[0]
+    return None
+
+
+def local_subnet() -> ipaddress.IPv4Network:
+    """The /24 of the LAN address this box routes out of. POC: assumes a /24 home network."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("192.0.2.1", 9))  # UDP connect sends nothing; it only picks a route
+        return ipaddress.ip_network(f"{s.getsockname()[0]}/24", strict=False)
+
+
+def sweep(subnet: ipaddress.IPv4Network, port: int, timeout_s: float = 0.5) -> None:
+    """Knock on `port` across the subnet so every live host lands in the ARP table."""
+
+    def knock(host: ipaddress.IPv4Address) -> None:
+        try:
+            socket.create_connection((str(host), port), timeout=timeout_s).close()
+        except OSError:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(64) as pool:
+        list(pool.map(knock, subnet.hosts()))
+
+
+def resolve_stream_url(
+    url: str,
+    mac: str,
+    lookup: Callable[[str], str | None] = arp_lookup,
+    rescan: Callable[[int], None] = lambda port: sweep(local_subnet(), port),
+) -> str:
+    """Fill a `{host}` placeholder in the stream URL with the camera's current IP.
+
+    The camera gets its address from DHCP, so it is found by its MAC (stable) through the
+    ARP table, knocking on the stream port across the LAN first if the entry has aged out.
+    Called on every (re)connect, so a new lease is picked up on the next retry. Needs the
+    container on the host network so it sees the LAN and the host's ARP table.
+    """
+    if "{host}" not in url:
+        return url
+    if not mac:
+        raise RuntimeError("KASA_STREAM_URL has {host} but KASA_CAMERA_MAC is not set")
+    ip = lookup(mac)
+    if ip is None:
+        parts = urlsplit(url.replace("{host}", "placeholder"))
+        rescan(parts.port or (554 if parts.scheme == "rtsp" else 443))
+        ip = lookup(mac)
+    if ip is None:
+        raise RuntimeError(f"camera {mac} not found on the LAN")
+    return url.replace("{host}", ip)
+
+
 def build_ffmpeg_command(secrets: Secrets, fps: int = 2, width: int = FRAME_WIDTH) -> list[str]:
     """ffmpeg invocation for either an RTSP (newer Kasa) or HTTPS :19443 (older Kasa) stream."""
-    url = secrets.kasa_stream_url
+    url = resolve_stream_url(secrets.kasa_stream_url, secrets.kasa_camera_mac)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     if url.startswith("rtsp://"):
         cmd += ["-rtsp_transport", "tcp"]

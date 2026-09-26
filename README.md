@@ -19,7 +19,7 @@ Kasa camera ──ffmpeg (2 fps JPEG)──▶ FrameBuffer ──▶ MotionDetec
                                    (ref photos cached)    │
                                                           ├──▶ SQLite (state, plates, events, LLM log)
                                                           ├──▶ Slack webhook
-                                                          └──▶ dashboard :8080
+                                                          └──▶ dashboard 127.0.0.1:8081 (live MJPEG)
 ```
 
 States: `OUTSIDE_WINDOW → IDLE → WATCHING → OPENING → FEEDING → CLOSING → COOLDOWN → IDLE|DONE`.
@@ -33,11 +33,18 @@ restart mid-session cannot double-feed).
 ## Run it
 
 ```bash
-cp .env.example .env            # fill in camera, Anthropic, PetLibro, Slack, DASH_TOKEN
+cp .env.example .env            # fill in camera, Anthropic, PetLibro, Slack, DASH_USER/PASSWORD
 mkdir -p config && cp config.toml config/config.toml
 docker compose up -d --build
 docker compose logs -f
+tools/expose.sh grrr.threaditate.com   # once: Cloudflare hostname + Tailscale Serve
 ```
+
+**Camera address.** The camera takes its IP from DHCP, so the URL in `.env` uses a
+`{host}` placeholder and `KASA_CAMERA_MAC` identifies the camera. On every (re)connect the
+app looks the MAC up in the ARP table, knocking on the stream port across the /24 first if
+the entry has aged out. That is why the container runs with `network_mode: host`. A DHCP
+reservation on the router is a good belt-and-braces addition but not required.
 
 `DRY_RUN` is `true` by default: the machine logs "would open plate N" and never touches
 the feeder. Watch a full dry night, then flip `DRY_RUN` off on the dashboard.
@@ -52,7 +59,7 @@ Local development without Docker:
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]" -e ./petlibro-cli
 brew install ffmpeg          # or apt install ffmpeg
-.venv/bin/animaleyes         # dashboard on http://localhost:8080/?token=$DASH_TOKEN
+.venv/bin/animaleyes         # dashboard on http://127.0.0.1:8081/ (basic auth)
 .venv/bin/pytest
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 ```
@@ -84,18 +91,26 @@ reference photos the prefix silently won't cache on that model.
 
 ## Dashboard from your phone
 
-The box runs Tailscale; the dashboard binds `0.0.0.0:8080`, so from any device on the
-tailnet open:
+The app runs on the same box as robot-computer, whose dashboard owns 8080, so this one
+listens on `127.0.0.1:8081` only. Nothing reaches it except through the host:
 
-```
-http://<box-name>.<tailnet>.ts.net:8080/?token=<DASH_TOKEN>
-```
+- **Cloudflare Tunnel**: `tools/expose.sh <hostname>` adds the hostname as a second
+  ingress rule on robot-computer's existing tunnel (backs up and validates the config
+  first), so `https://<hostname>/` works from anywhere with no router port open.
+- **Tailscale Serve**: the same script runs `tailscale serve --https=8443`, so
+  `https://robot-computer.<tailnet>.ts.net:8443/` works from the tailnet.
 
-Set `DASH_PUBLIC_URL` in `.env` to that base URL so Slack messages link straight to the
-event page with its frames. Everything on the dashboard requires the token. It shows
-state, plates, feeds this window, next allowed feed, heartbeat and camera age, LLM calls and
-estimated cost today, the live frame with the last verdict overlaid, all controls, a
-confirm-gated **Feed now**, and the event log with frames and LLM JSON.
+Every route except `/healthz` asks for HTTP basic auth (`DASH_USER` / `DASH_PASSWORD`);
+the phone's browser remembers it. Put Cloudflare Access in front of the public hostname
+too, the same as robot-computer, since basic auth has no rate limiting.
+
+Set `DASH_PUBLIC_URL` in `.env` to the public URL so Slack messages link straight to the
+event page; the links carry no credentials. The page shows state, plates, feeds this
+window, next allowed feed, heartbeat and camera age, LLM calls and estimated cost today,
+the **live camera** (MJPEG at the ingest rate, ~2 fps, with the last verdict overlaid and a
+pause button for cellular), all controls, a confirm-gated **Feed now**, and the event log
+with frames and LLM JSON. The live view reuses the frames the app already decodes, so
+watching it opens no second connection to the camera and there's no need for the Kasa app.
 
 ## Ops
 
@@ -114,10 +129,11 @@ POC shortcuts (search the code for `POC`):
 
 - Identification is a cloud LLM call on every motion burst. Fine for one dog and one
   feeder; costs real money and needs the internet.
-- Slack messages link to the dashboard with the token in the URL.
+- The live view is ~2 fps, the rate motion detection is tuned for.
+- The camera is found by MAC assuming a /24 home network.
 - No chirp/buzzer on veto: no hardware for it.
 - "Bowl eaten" is a single LLM judgement on the last frames before closing.
-- The dashboard is one inline HTML page, no auth beyond the token.
+- The dashboard is one inline HTML page behind basic auth; no users or sessions.
 
 **v1**: local model (small classifier fine-tuned on this camera's frames) on a Raspberry
 Pi, PIR sensor to gate the camera instead of frame differencing, a buzzer for vetoes, real

@@ -120,7 +120,10 @@ def main() -> None:
     )
     try:
         uvicorn.run(
-            app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), log_level="warning"
+            app,
+            host=os.environ.get("HOST", "127.0.0.1"),
+            port=int(os.environ.get("PORT", "8081")),
+            log_level="warning",
         )
     finally:
         stop.set()
