@@ -79,21 +79,25 @@ def create_app(
     reload_references=None,
     reference_dir: Path | None = None,
     training_dir: Path | None = None,
+    personas=None,
     frontend_dist: Path | None = None,
     ptz=None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
-    ANIMALS = ("grrr", "bowie", "cat")
     index_html = frontend_dist / "index.html" if frontend_dist else None
     PHOTO_SETS = {"reference": reference_dir, "training": training_dir}
     IMG_EXT = (".jpg", ".jpeg", ".png")
+
+    def animal_keys() -> list[str]:
+        # The roster is persona-driven; fall back to the fixed trio when no store is wired (tests).
+        return personas.keys() if personas is not None else ["grrr", "bowie", "cat"]
+
     # "unlabeled" is a bucket in the training set only: frames capture mode saved that have no
     # label yet. It's a valid source for listing/viewing/deleting/re-tagging, but never a
-    # re-tag *target* (you tag INTO grrr/bowie/cat).
-    TRAINING_BUCKETS = (*ANIMALS, "unlabeled")
-
+    # re-tag *target* (you tag INTO a real animal).
     def _valid_bucket(set_name: str, animal: str) -> bool:
-        return animal in (TRAINING_BUCKETS if set_name == "training" else ANIMALS)
+        keys = animal_keys()
+        return animal in (keys + ["unlabeled"] if set_name == "training" else keys)
 
     def photo_dir(set_name: str, animal: str, create: bool = False) -> Path:
         base = PHOTO_SETS.get(set_name)
@@ -116,7 +120,7 @@ def create_app(
         # Count the photos actually on disk, independent of the active detector (YOLO doesn't
         # track reference images, so reading them off the identifier wrongly showed 0).
         counts: dict[str, int] = {}
-        for a in ANIMALS:
+        for a in animal_keys():
             d = (reference_dir / a) if reference_dir else None
             counts[a] = (
                 sum(1 for p in d.glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
@@ -237,7 +241,10 @@ def create_app(
             if machine.last_llm_at
             else None,
             "reference_counts": ref_counts(),
-            "training_counts": {a: len(list_photos("training", a)) for a in TRAINING_BUCKETS},
+            "training_counts": {
+                a: len(list_photos("training", a)) for a in [*animal_keys(), "unlabeled"]
+            },
+            "personas": [p.to_dict() for p in personas.load()] if personas is not None else [],
             "capture_mode": settings.CAPTURE_MODE,
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
         }
@@ -332,7 +339,7 @@ def create_app(
         return {"ok": f"{action} requested; the state machine runs it on its next tick"}
 
     def _animal_dir(animal: str) -> Path:
-        if animal not in ANIMALS or reference_dir is None:
+        if animal not in animal_keys() or reference_dir is None:
             raise HTTPException(status_code=400, detail="unknown animal")
         d = reference_dir / animal
         d.mkdir(parents=True, exist_ok=True)
@@ -397,8 +404,8 @@ def create_app(
 
     @app.post("/api/photos/{set_name}/{animal}/{name}/retag", dependencies=guarded)
     def photo_retag(set_name: str, animal: str, name: str, to: str) -> dict[str, bool]:
-        if to not in ANIMALS:  # you tag INTO a real animal, never back to "unlabeled"
-            raise HTTPException(status_code=400, detail="can only re-tag to grrr/bowie/cat")
+        if to not in animal_keys():  # you tag INTO a real animal, never back to "unlabeled"
+            raise HTTPException(status_code=400, detail="can only re-tag to a known animal")
         src_dir = photo_dir(set_name, animal)
         src = (src_dir / Path(name).name).resolve()
         if not src.is_file() or src_dir.resolve() not in src.parents:
@@ -407,6 +414,54 @@ def create_app(
         src.rename(dst)
         if set_name == "reference" and reload_references:
             reload_references()
+        return {"ok": True}
+
+    # --- animal personas (roster the detector knows about) ----------------------------
+    @app.get("/api/personas", dependencies=guarded)
+    def personas_list() -> list[dict[str, Any]]:
+        return [p.to_dict() for p in personas.load()] if personas is not None else []
+
+    @app.post("/api/personas", dependencies=guarded)
+    async def personas_upsert(request: Request) -> dict[str, Any]:
+        if personas is None:
+            raise HTTPException(status_code=503, detail="personas unavailable")
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        try:
+            persona = personas.upsert(name, str(body.get("description", "")), body.get("key"))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"no such persona {exc}") from exc
+        # Make the photo folders so uploads/capture have somewhere to land, and rebuild the
+        # detector's cached reference prefix + schema so a new/renamed animal takes effect.
+        for base in (reference_dir, training_dir):
+            if base is not None:
+                (base / persona.key).mkdir(parents=True, exist_ok=True)
+        if reload_references:
+            reload_references()
+        store.add_event(machine.clock(), "persona", f"saved {persona.name}", persona.to_dict())
+        return persona.to_dict()
+
+    @app.delete("/api/personas/{key}", dependencies=guarded)
+    def personas_delete(key: str) -> dict[str, bool]:
+        if personas is None:
+            raise HTTPException(status_code=503, detail="personas unavailable")
+        try:
+            personas.delete(key)
+        except ValueError as exc:  # the feedable target can't be removed (invariant)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Remove its photos too so a deleted animal doesn't linger in the galleries.
+        for base in (reference_dir, training_dir):
+            d = (base / key) if base else None
+            if d and d.is_dir():
+                for p in d.iterdir():
+                    if p.is_file():
+                        p.unlink()
+                d.rmdir()
+        if reload_references:
+            reload_references()
+        store.add_event(machine.clock(), "persona", f"deleted {key}", {"key": key})
         return {"ok": True}
 
     @app.get("/frame.jpg", dependencies=guarded)

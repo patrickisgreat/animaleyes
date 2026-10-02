@@ -266,12 +266,17 @@ def test_open_now_raises_on_timeout_when_no_feed_active(monkeypatch) -> None:
         pass
 
 
-def test_claude_rebuilds_reference_blocks_when_descriptions_change(tmp_path, monkeypatch) -> None:
-    """Editing an animal description from the dashboard takes effect: the cached prefix is
-    rebuilt with the new label on the next identify."""
+def test_claude_rebuilds_reference_blocks_when_personas_change(tmp_path, monkeypatch) -> None:
+    """Editing a persona from the dashboard takes effect: the cached prefix and schema are
+    rebuilt with the new label/roster on the next identify."""
+    from animaleyes.personas import Persona
     from animaleyes.vision import ClaudeIdentifier
 
-    desc = {"grrr": "v1", "bowie": "b", "cat": "c"}
+    roster = [
+        Persona("grrr", "Grrr", "v1", feedable=True),
+        Persona("bowie", "Bowie", "b"),
+        Persona("cat", "Chicken", "c"),
+    ]
     for a in ("grrr", "bowie", "cat"):
         (tmp_path / a).mkdir()
 
@@ -279,11 +284,48 @@ def test_claude_rebuilds_reference_blocks_when_descriptions_change(tmp_path, mon
         pass
 
     ident = ClaudeIdentifier(
-        tmp_path, store=None, model=lambda: "m", client=_NoClient(), descriptions=lambda: desc
+        tmp_path, store=None, model=lambda: "m", client=_NoClient(), personas=lambda: roster
     )
     assert any("v1" in b.get("text", "") for b in ident.reference_blocks)
-    desc["grrr"] = "a new description"
-    # identify() would call the API, so just exercise the rebuild guard directly.
-    if ident.descriptions() != ident._desc_used:
-        ident.reload_references()
+    assert ident.target_name == "Grrr"
+    assert "cat" in ident.identify_schema["properties"]["animal"]["enum"]
+    # Rename the target and add a new animal; the next guard rebuilds everything.
+    roster[0] = Persona("grrr", "Gizmo", "a new description", feedable=True)
+    roster.append(Persona("rex", "Rex", "a big dog"))
+    ident._maybe_reload()
     assert any("a new description" in b.get("text", "") for b in ident.reference_blocks)
+    assert ident.target_name == "Gizmo"
+    assert "rex" in ident.identify_schema["properties"]["animal"]["enum"]
+
+
+def test_persona_store_crud_and_feed_invariant(tmp_path) -> None:
+    from animaleyes.personas import PersonaStore
+
+    store = PersonaStore(tmp_path / "personas.json")
+    roster = store.load()  # seeds defaults
+    names = {p.key: p.name for p in roster}
+    assert names["cat"] == "Chicken"  # the cat's display name
+    assert [p.key for p in roster if p.feedable] == ["grrr"]  # exactly the target is feedable
+
+    # Add a new animal — always blocked, with a slug key.
+    rex = store.upsert("Rex", "a big dog")
+    assert rex.key == "rex" and rex.feedable is False
+    assert "rex" in store.keys()
+
+    # Rename the cat; key stays stable so photos/history don't move.
+    store.upsert("Mr Whiskers", "sleek", key="cat")
+    assert store.names()["cat"] == "Mr Whiskers"
+
+    # Even if a tampered file marks another animal feedable, load() re-locks to the target only.
+    (tmp_path / "personas.json").write_text(
+        '[{"key":"grrr","name":"Grrr","feedable":false},'
+        '{"key":"bowie","name":"Bowie","feedable":true}]'
+    )
+    reloaded = {p.key: p.feedable for p in store.load()}
+    assert reloaded == {"grrr": True, "bowie": False}
+
+    # The feedable target can never be deleted.
+    import pytest
+
+    with pytest.raises(ValueError):
+        store.delete("grrr")

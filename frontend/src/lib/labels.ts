@@ -1,5 +1,5 @@
 import type { Status } from "./api";
-import { NAMES } from "./api";
+import { nameMap } from "./api";
 
 // state -> [label, sublabel, dot tone]
 export const STATES: Record<string, [string, string, string]> = {
@@ -37,12 +37,13 @@ export function verdictText(s: Status): { who: string; why: string } {
   if (!v) return { who: "Nothing yet", why: "No animal checked since the last feed" };
   if (v.animal === "none") return { who: "No animal at the bowl", why: v.reason || "" };
   if (v.animal === "unsure") return { who: "Not sure who that is", why: v.reason || "" };
+  const names = nameMap(s.personas);
   const pct = Math.round((v.confidence || 0) * 100);
   const extra = v.other_animals_present?.length
-    ? " · also " + v.other_animals_present.map((a) => NAMES[a] || a).join(", ")
+    ? " · also " + v.other_animals_present.map((a) => names[a] || a).join(", ")
     : "";
   return {
-    who: `${NAMES[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}`,
+    who: `${names[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}`,
     why: v.reason || "",
   };
 }

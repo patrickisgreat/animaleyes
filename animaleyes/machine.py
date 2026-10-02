@@ -376,7 +376,7 @@ class Machine:
         if verdict.grrr_at_bowl:
             self.store.set("grrr_last_seen_at", now.isoformat())
         for animal in verdict.other_animals_present:
-            if animal in ("bowie", "cat"):
+            if animal not in ("grrr", "none", "unsure"):  # any non-target real animal
                 self._log_once(
                     now,
                     f"{animal}_during_feed",
@@ -501,7 +501,9 @@ class Machine:
         if len(recent) < 2:
             return
         animals = {v.animal for v in recent}
-        if len(animals) == 1 and animals <= {"bowie", "cat"}:
+        # A stable, non-target real animal seen twice in a row -> veto (never a feedable read,
+        # never a "none"/"unsure"). Works for any persona without hardcoding the roster.
+        if len(animals) == 1 and animals.isdisjoint({"grrr", "none", "unsure"}):
             animal = recent[-1].animal
             self._log_once(
                 now,

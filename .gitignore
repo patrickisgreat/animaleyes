@@ -20,6 +20,10 @@ data/reference/**/*.jpg
 data/reference/**/*.jpeg
 data/reference/**/*.png
 
+# Training frames (captured pets/home) and the per-deployment persona roster are runtime state.
+data/training/
+data/personas.json
+
 # React dashboard build artifacts
 frontend/node_modules/
 frontend/dist/

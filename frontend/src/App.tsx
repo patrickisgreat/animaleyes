@@ -7,7 +7,7 @@ import { Feeder, Plates } from "./panels/Feeder";
 import { StatusTiles } from "./panels/Status";
 import { Activity } from "./panels/Activity";
 import { ReferencePhotos, TrainingGallery } from "./panels/Photos";
-import { Descriptions } from "./panels/Descriptions";
+import { Personas } from "./panels/Personas";
 import { Settings } from "./panels/Settings";
 
 export function App() {
@@ -41,9 +41,9 @@ export function App() {
       </div>
 
       <div className="grid gap-4 mt-4">
-        <ReferencePhotos counts={s?.reference_counts || {}} refresh={refresh} />
-        <Descriptions />
-        <TrainingGallery counts={s?.training_counts || {}} captureMode={s?.capture_mode} />
+        <Personas personas={s?.personas || []} refresh={refresh} />
+        <ReferencePhotos personas={s?.personas || []} counts={s?.reference_counts || {}} refresh={refresh} />
+        <TrainingGallery personas={s?.personas || []} counts={s?.training_counts || {}} captureMode={s?.capture_mode} />
         <Settings />
       </div>
     </div>

@@ -24,6 +24,7 @@ from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
 from .notify import SlackNotifier
+from .personas import PersonaStore
 from .ptz import Ptz
 from .store import Store
 from .vision import ClaudeIdentifier
@@ -68,20 +69,16 @@ def _yolo(config: ConfigStore):
     )
 
 
-def _claude(config: ConfigStore, store: Store):
-    def descriptions() -> dict[str, str]:
-        s = config.load()
-        return {"grrr": s.GRRR_DESC, "bowie": s.BOWIE_DESC, "cat": s.CAT_DESC}
-
+def _claude(config: ConfigStore, store: Store, personas: PersonaStore):
     return ClaudeIdentifier(
         DATA_DIR / "reference",
         store,
         model=lambda: config.load().LLM_MODEL,
-        descriptions=descriptions,
+        personas=personas.load,
     )
 
 
-def build_identifier(name: str, config: ConfigStore, store: Store):
+def build_identifier(name: str, config: ConfigStore, store: Store, personas: PersonaStore):
     """Select the detector backend by config. Backends share the Identifier interface, so the
     state machine is unchanged whichever is chosen."""
     if name == "yolo":
@@ -93,12 +90,12 @@ def build_identifier(name: str, config: ConfigStore, store: Store):
         log.info("identifier: cascade (YOLO gate → Claude confirm)")
         return CascadeIdentifier(
             gate=_yolo(config),
-            confirm=_claude(config, store),
+            confirm=_claude(config, store, personas),
             config=config,
             training_dir=DATA_DIR / "training",
         )
     log.info("identifier: Claude (%s)", config.load().LLM_MODEL)
-    return _claude(config, store)
+    return _claude(config, store, personas)
 
 
 def capture_gate(llm, config: ConfigStore):
@@ -122,14 +119,21 @@ def capture_gate(llm, config: ConfigStore):
 
 def build(
     secrets: Secrets,
-) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None]:
+) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None, PersonaStore]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
-    fps = max(1, config.load().CAMERA_FPS)
+    s0 = config.load()
+    # Seed the persona roster from any descriptions already set in config so dashboard edits
+    # aren't lost on the first run with personas.
+    personas = PersonaStore(
+        DATA_DIR / "personas.json",
+        seed={"grrr": s0.GRRR_DESC, "bowie": s0.BOWIE_DESC, "cat": s0.CAT_DESC},
+    )
+    fps = max(1, s0.CAMERA_FPS)
     frames = FrameBuffer(size=max(12, fps * 4))  # ~4s of history regardless of fps
     motion = MotionDetector()
     camera = Camera(secrets, frames, on_frame=motion.feed, fps=fps)
-    llm = build_identifier(config.load().IDENTIFIER, config, store)
+    llm = build_identifier(s0.IDENTIFIER, config, store, personas)
     events: ReolinkEvents | None = None
     if secrets.kasa_stream_url:
         # Camera-driven motion gate (ONVIF). Keeps the LLM from firing on frame-diff noise.
@@ -155,7 +159,7 @@ def build(
         capture_gate=capture_gate(llm, config),
         capture_dir=DATA_DIR / "training" / "unlabeled",
     )
-    return machine, camera, config, store, llm, events
+    return machine, camera, config, store, llm, events, personas
 
 
 def run_loop(machine: Machine, stop: threading.Event) -> None:
@@ -180,7 +184,7 @@ def main() -> None:
     secrets = Secrets.from_env()
     if not (secrets.dash_user and secrets.dash_password):
         raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
-    machine, camera, config, store, llm, events = build(secrets)
+    machine, camera, config, store, llm, events, personas = build(secrets)
     if secrets.kasa_stream_url:
         camera.start()
         if events is not None:
@@ -200,6 +204,7 @@ def main() -> None:
         reload_references=llm.reload_references,
         reference_dir=DATA_DIR / "reference",
         training_dir=DATA_DIR / "training",
+        personas=personas,
         frontend_dist=FRONTEND_DIST,
         ptz=Ptz(secrets.kasa_stream_url, secrets.kasa_camera_mac)
         if secrets.kasa_stream_url
