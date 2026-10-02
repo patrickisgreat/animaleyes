@@ -22,6 +22,7 @@ export function App() {
         <span className="flex-1" />
         {s && <Badge tone={s.dry_run ? "pearl" : "teal"}>{s.dry_run ? "Dry run" : "Live"}</Badge>}
         {s && <Badge tone={s.camera_offline ? "bad" : "teal"}>{s.camera_offline ? "Camera offline" : "Camera ok"}</Badge>}
+        {s?.capture_mode && <Badge tone="sage">📸 Capturing</Badge>}
         <ThemeToggle />
       </header>
 
@@ -42,7 +43,7 @@ export function App() {
       <div className="grid gap-4 mt-4">
         <ReferencePhotos counts={s?.reference_counts || {}} refresh={refresh} />
         <Descriptions />
-        <TrainingGallery counts={s?.training_counts || {}} />
+        <TrainingGallery counts={s?.training_counts || {}} captureMode={s?.capture_mode} />
         <Settings />
       </div>
     </div>

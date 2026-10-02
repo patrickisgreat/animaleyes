@@ -59,6 +59,12 @@ class Settings:
     COLLECT_TRAINING: bool = True
     TRAINING_MIN_CONF: float = 0.6
     TRAINING_MIN_GAP_S: int = 5  # don't save more than one crop this often (avoid bursts)
+    # Capture mode: a data-gathering mode (independent of feeding). When on, any motion the
+    # free local detector reads as an animal is saved, unlabelled, to data/training/unlabeled/
+    # for the human to tag. Runs all day regardless of the active window; never touches the
+    # feeder (it only writes image files).
+    CAPTURE_MODE: bool = False
+    CAPTURE_MIN_GAP_S: int = 3  # at most one captured frame this often
     # Per-animal descriptions fed to Claude (editable from the dashboard). These label the
     # reference photos and give the model distinguishing cues; the IR/size guidance is in the
     # system prompt. Keep "only Grrr is fed" explicit.

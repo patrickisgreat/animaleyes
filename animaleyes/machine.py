@@ -62,6 +62,8 @@ class Machine:
         frames_dir: Path,
         dashboard_url: str = "",
         events=None,
+        capture_gate: Identifier | None = None,
+        capture_dir: Path | None = None,
     ):
         self.config = config
         self.store = store
@@ -75,6 +77,10 @@ class Machine:
         self.clock = clock
         self.frames_dir = frames_dir
         self.dashboard_url = dashboard_url
+        # Capture mode: a free local detector + the unlabelled-frame directory. Both may be
+        # None (no local detector available), in which case capture mode quietly does nothing.
+        self.capture_gate = capture_gate
+        self.capture_dir = capture_dir
         self.verdicts: deque[Verdict] = deque(maxlen=VERDICT_HISTORY)
         self.last_verdict: Verdict | FeedingVerdict | None = None
         self.judged_frames: list[Frame] = []
@@ -134,6 +140,8 @@ class Machine:
         self._heartbeat(now)
         self._poll_lid(now)
         self._consume_dashboard_requests(now)
+        if self.settings.CAPTURE_MODE:
+            self._tick_capture(now)
 
         state = self.state
         lid_open = state in (State.FEEDING, State.CLOSING)
@@ -423,6 +431,45 @@ class Machine:
         event_id = self.store.add_event(now, kind, reason, data, frames)
         if notify:
             self._notify(f"{kind}: {reason}", event_id)
+
+    def _tick_capture(self, now: datetime) -> None:
+        """Capture mode: on any motion the local detector reads as an animal, save one frame,
+        unlabelled, to the capture directory for the human to tag later for YOLO training.
+
+        Runs independently of the feeding state machine — regardless of the active window or
+        ENABLED — and only ever writes image files, so it can never move the feeder.
+        """
+        if self.capture_gate is None or self.capture_dir is None:
+            return
+        if not self._motion(now):
+            return
+        last = self._when("capture_last_at")
+        gap = max(1, self.settings.CAPTURE_MIN_GAP_S)
+        if last and (now - last).total_seconds() < gap:
+            return
+        frames = self.frames.latest(1)
+        if not frames:
+            return
+        try:
+            verdict = self.capture_gate.identify(frames)
+        except Exception as exc:  # noqa: BLE001 - a broken detector must not stall the loop
+            self._log_once(now, "capture_error", f"detector failed: {exc}", 3600)
+            return
+        if verdict.animal in ("none", "unsure"):
+            return  # motion, but no animal the detector recognised — don't save noise
+        self.store.set("capture_last_at", now.isoformat())
+        frame = frames[-1]
+        self.capture_dir.mkdir(parents=True, exist_ok=True)
+        # Filename carries the detector's rough guess (a hint for tagging) but the frame goes to
+        # the unlabelled bucket; the human assigns the real label.
+        stamp = frame.at.strftime("%Y%m%d-%H%M%S")
+        name = f"{stamp}_{verdict.animal}_{int(verdict.confidence * 100)}.jpg"
+        try:
+            (self.capture_dir / name).write_bytes(frame.jpeg)
+        except OSError as exc:
+            self._log_once(now, "capture_error", f"write failed: {exc}", 3600)
+            return
+        self.store.set("capture_count", self.store.get_int("capture_count") + 1)
 
     def _save_frames(self, tag: str, frames: list[Frame] | None = None) -> list[str]:
         # Default to the exact frames the detector just judged (self.judged_frames) so an

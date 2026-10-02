@@ -38,6 +38,7 @@ export type Status = {
   last_llm_at: string | null;
   reference_counts: Record<string, number>;
   training_counts: Record<string, number>;
+  capture_mode: boolean;
   feeding_since: string | null;
 };
 

@@ -364,3 +364,73 @@ def test_feed_failure_backs_off_before_retrying(h: Harness) -> None:
     opens_before = len(h.feeder.opens)
     confirm_grrr(h)
     assert len(h.feeder.opens) == opens_before  # blocked by FEED_RETRY_BACKOFF_S
+
+
+def test_capture_mode_saves_animal_frames_unlabelled(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = GRRR  # the local gate sees an animal
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True})
+    h.load_plates(1)
+    h.tick(motion=True)
+    saved = list((h.tmp_path / "unlabeled").glob("*.jpg"))
+    assert len(saved) == 1
+    assert h.store.get_int("capture_count") == 1
+    # Capture only records frames; it must never move the feeder.
+    assert h.feeder.opens == []
+
+
+def test_capture_mode_skips_when_no_animal(h: Harness) -> None:
+    from tests.conftest import UNSURE, FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = UNSURE  # motion but nothing the detector recognises
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True})
+    h.load_plates(1)
+    h.tick(motion=True)
+    assert not (h.tmp_path / "unlabeled").exists() or not list(
+        (h.tmp_path / "unlabeled").glob("*.jpg")
+    )
+
+
+def test_capture_mode_off_saves_nothing(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = GRRR
+    h.machine.capture_gate = gate
+    h.load_plates(1)
+    h.tick(motion=True)
+    assert not (h.tmp_path / "unlabeled").exists()
+
+
+def test_capture_mode_throttles(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = CAT
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True, "CAPTURE_MIN_GAP_S": 10})
+    h.load_plates(1)
+    h.tick(motion=True)  # saved
+    h.tick(motion=True, seconds=2)  # 2s later, within the 10s gap -> skipped
+    assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 1
+    h.tick(motion=True, seconds=10)  # now past the gap -> saved again
+    assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 2
+
+
+def test_capture_mode_runs_outside_active_window(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = BOWIE
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True})
+    h.clock.now = datetime(2026, 9, 24, 13, 0)  # 1pm, well outside 21:00-06:00
+    h.load_plates(1)
+    h.tick(motion=True)
+    assert h.state() == "OUTSIDE_WINDOW"  # feeding logic is dormant...
+    assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 1  # ...but capture still runs

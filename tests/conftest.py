@@ -106,6 +106,7 @@ class Harness:
         self.llm = FakeLLM()
         self.feeder = FakeFeeder()
         self.notifier = LogNotifier()
+        self.capture_gate = None  # tests set this to a FakeLLM to exercise capture mode
         self.machine = self.new_machine()
 
     def new_machine(self) -> Machine:
@@ -121,6 +122,8 @@ class Harness:
             clock=self.clock,
             frames_dir=self.tmp_path / "frames",
             dashboard_url="http://dash",
+            capture_gate=self.capture_gate,
+            capture_dir=self.tmp_path / "unlabeled",
         )
 
     def load_plates(self, *plates: int) -> None:

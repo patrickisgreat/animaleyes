@@ -8,9 +8,12 @@ type Preset = { token: string; name: string };
 export function CameraPtz({ s }: { s: Status | null }) {
   const toast = useToast();
   const [presets, setPresets] = useState<Preset[]>([]);
+  // Collapsed by default: these move the physical camera, so we don't want a stray tap to
+  // throw off the framing. The user opens it deliberately when they want to re-aim.
+  const [open, setOpen] = useState(false);
   const loadPresets = () =>
     fetch("/api/ptz/presets").then((r) => r.json()).then((d) => setPresets(d.presets || [])).catch(() => {});
-  useEffect(() => { if (s?.ptz_available) loadPresets(); /* eslint-disable-next-line */ }, [s?.ptz_available]);
+  useEffect(() => { if (s?.ptz_available && open) loadPresets(); /* eslint-disable-next-line */ }, [s?.ptz_available, open]);
 
   if (!s?.ptz_available) return null;
 
@@ -34,7 +37,20 @@ export function CameraPtz({ s }: { s: Status | null }) {
   );
 
   return (
-    <Card title="Camera angle">
+    <Card
+      title="Camera angle"
+      right={
+        <button onClick={() => setOpen((o) => !o)} className="btn btn-sm" title={open ? "collapse" : "expand"}>
+          {open ? "Hide ▲" : "Adjust ▼"}
+        </button>
+      }
+    >
+      {!open && (
+        <div className="text-muted text-xs">
+          Collapsed so a stray tap can’t move the camera. Tap “Adjust” to re-aim.
+        </div>
+      )}
+      {open && (
       <div className="flex flex-wrap items-start gap-5">
         <div className="grid grid-cols-3 gap-1.5 w-max">
           <span />
@@ -61,6 +77,7 @@ export function CameraPtz({ s }: { s: Status | null }) {
           </div>
         </div>
       </div>
+      )}
     </Card>
   );
 }

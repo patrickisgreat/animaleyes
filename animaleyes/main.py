@@ -101,6 +101,25 @@ def build_identifier(name: str, config: ConfigStore, store: Store):
     return _claude(config, store)
 
 
+def capture_gate(llm, config: ConfigStore):
+    """The free, local detector capture mode uses to decide "is this an animal". Reuse the
+    active backend's YOLO model if there is one (cascade's gate, or a bare YOLO identifier) so
+    we don't load the model twice; otherwise build one. Returns None if YOLO isn't installed
+    (capture mode then quietly does nothing — it exists to feed a YOLO dataset)."""
+    from .cascade import CascadeIdentifier
+    from .yolo import YoloIdentifier
+
+    if isinstance(llm, CascadeIdentifier):
+        return llm.gate
+    if isinstance(llm, YoloIdentifier):
+        return llm
+    try:
+        return _yolo(config)
+    except Exception as exc:  # noqa: BLE001 - absence of a local detector is non-fatal
+        log.warning("capture mode: no local detector available (%s)", exc)
+        return None
+
+
 def build(
     secrets: Secrets,
 ) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None]:
@@ -132,6 +151,8 @@ def build(
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
         events=events,
+        capture_gate=capture_gate(llm, config),
+        capture_dir=DATA_DIR / "training" / "unlabeled",
     )
     return machine, camera, config, store, llm, events
 

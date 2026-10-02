@@ -85,10 +85,17 @@ def create_app(
     index_html = frontend_dist / "index.html" if frontend_dist else None
     PHOTO_SETS = {"reference": reference_dir, "training": training_dir}
     IMG_EXT = (".jpg", ".jpeg", ".png")
+    # "unlabeled" is a bucket in the training set only: frames capture mode saved that have no
+    # label yet. It's a valid source for listing/viewing/deleting/re-tagging, but never a
+    # re-tag *target* (you tag INTO grrr/bowie/cat).
+    TRAINING_BUCKETS = (*ANIMALS, "unlabeled")
+
+    def _valid_bucket(set_name: str, animal: str) -> bool:
+        return animal in (TRAINING_BUCKETS if set_name == "training" else ANIMALS)
 
     def photo_dir(set_name: str, animal: str, create: bool = False) -> Path:
         base = PHOTO_SETS.get(set_name)
-        if base is None or animal not in ANIMALS:
+        if base is None or not _valid_bucket(set_name, animal):
             raise HTTPException(status_code=404, detail="unknown photo set or animal")
         d = base / animal
         if create:
@@ -228,7 +235,8 @@ def create_app(
             if machine.last_llm_at
             else None,
             "reference_counts": ref_counts(),
-            "training_counts": {a: len(list_photos("training", a)) for a in ANIMALS},
+            "training_counts": {a: len(list_photos("training", a)) for a in TRAINING_BUCKETS},
+            "capture_mode": settings.CAPTURE_MODE,
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
         }
 
@@ -387,6 +395,8 @@ def create_app(
 
     @app.post("/api/photos/{set_name}/{animal}/{name}/retag", dependencies=guarded)
     def photo_retag(set_name: str, animal: str, name: str, to: str) -> dict[str, bool]:
+        if to not in ANIMALS:  # you tag INTO a real animal, never back to "unlabeled"
+            raise HTTPException(status_code=400, detail="can only re-tag to grrr/bowie/cat")
         src_dir = photo_dir(set_name, animal)
         src = (src_dir / Path(name).name).resolve()
         if not src.is_file() or src_dir.resolve() not in src.parents:

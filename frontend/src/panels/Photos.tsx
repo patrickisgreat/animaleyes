@@ -72,26 +72,47 @@ export function ReferencePhotos({ counts, refresh }: { counts: Record<string, nu
   );
 }
 
-export function TrainingGallery({ counts }: { counts: Record<string, number> }) {
+export function TrainingGallery({ counts, captureMode }: { counts: Record<string, number>; captureMode?: boolean }) {
   const [open, setOpen] = useState(false);
+  const unlabeled = counts["unlabeled"] || 0;
   return (
     <Card>
       <button className="h2 flex items-center gap-2 w-full text-left" onClick={() => setOpen((x) => !x)}>
-        Training data — review &amp; tag frames <span className="text-muted">{open ? "▴" : "▾"}</span>
+        Training data — review &amp; tag frames
+        {unlabeled > 0 && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-teal/15 text-teal border border-teal/40">{unlabeled} to tag</span>}
+        <span className="text-muted ml-auto">{open ? "▴" : "▾"}</span>
       </button>
       <div className="text-muted text-xs mb-3">
         Frames auto‑saved when Claude confirmed a dog, pre‑labelled. Cull the bad ones and fix any wrong
         label (re‑tag) — this becomes the dataset for a local Grrr‑vs‑Bowie model, so Claude can be dropped.
       </div>
-      {open &&
-        ANIMALS.map((a) => (
-          <div key={a} className="mb-3.5">
-            <div className="font-bold capitalize mb-2">
-              {NAMES[a] || a} <span className="text-muted font-normal text-sm">{counts[a] || 0} frames</span>
+      {open && (
+        <>
+          <div className="mb-4 rounded-[10px] border border-teal/40 bg-teal/5 p-3">
+            <div className="font-bold mb-1 flex items-center gap-2">
+              Unlabeled
+              <span className="text-muted font-normal text-sm">{unlabeled} frame{unlabeled === 1 ? "" : "s"}</span>
+              <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${captureMode ? "bg-teal/15 text-teal border-teal/40" : "bg-surface2 text-muted border-edge"}`}>
+                capture mode {captureMode ? "on" : "off"}
+              </span>
             </div>
-            <PhotoGrid set="training" animal={a} reload={open ? 1 : 0} />
+            <div className="text-muted text-xs mb-2">
+              {captureMode
+                ? "Capture mode is saving every animal it sees here. Tap G / B / C on a frame to file it under Grrr, Bowie, or the cat, or ✕ to discard."
+                : "Turn on capture mode in Settings to collect frames here; then tag each one (G / B / C) for YOLO."}
+            </div>
+            <PhotoGrid set="training" animal="unlabeled" reload={open ? unlabeled : 0} />
           </div>
-        ))}
+          {ANIMALS.map((a) => (
+            <div key={a} className="mb-3.5">
+              <div className="font-bold capitalize mb-2">
+                {NAMES[a] || a} <span className="text-muted font-normal text-sm">{counts[a] || 0} frames</span>
+              </div>
+              <PhotoGrid set="training" animal={a} reload={open ? 1 : 0} />
+            </div>
+          ))}
+        </>
+      )}
     </Card>
   );
 }
