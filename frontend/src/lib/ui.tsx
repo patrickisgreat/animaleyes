@@ -34,19 +34,58 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 }
 
 // ---- Lightbox -----------------------------------------------------------
-// Click any snapshot to view it full-size, with ← → between a set and Esc to close.
-type LightboxState = { srcs: string[]; i: number } | null;
-const LightboxCtx = createContext<(srcs: string[], i?: number) => void>(() => {});
+// Click any snapshot to view it full-size, with ← → between a set and Esc to close. When opened
+// with tagging options, the enlarged view also carries tag/delete controls and auto-advances
+// after each action, so a whole batch can be tagged without leaving the big view.
+export type LightboxItem = { src: string; id: string };
+export type LightboxOpts = {
+  tags?: { to: string; label: string }[];
+  onTag?: (id: string, to: string) => void | Promise<unknown>;
+  onDelete?: (id: string) => void | Promise<unknown>;
+};
+type LightboxState = { items: LightboxItem[]; i: number; opts?: LightboxOpts } | null;
+type OpenLightbox = (items: (string | LightboxItem)[], i?: number, opts?: LightboxOpts) => void;
+const LightboxCtx = createContext<OpenLightbox>(() => {});
 export const useLightbox = () => useContext(LightboxCtx);
 
 export function LightboxProvider({ children }: { children: ReactNode }) {
   const [box, setBox] = useState<LightboxState>(null);
-  const open = useCallback((srcs: string[], i = 0) => srcs.length && setBox({ srcs, i }), []);
+  const [busy, setBusy] = useState(false);
+  const open = useCallback<OpenLightbox>((items, i = 0, opts) => {
+    const norm = items.map((it) => (typeof it === "string" ? { src: it, id: it } : it));
+    if (norm.length) setBox({ items: norm, i, opts });
+  }, []);
   const close = useCallback(() => setBox(null), []);
   const step = useCallback(
-    (d: number) => setBox((b) => (b ? { ...b, i: (b.i + d + b.srcs.length) % b.srcs.length } : b)),
+    (d: number) => setBox((b) => (b ? { ...b, i: (b.i + d + b.items.length) % b.items.length } : b)),
     [],
   );
+  // Drop the current item from the set and stay on the same slot (now the next image), closing
+  // when the batch is done — this is what makes tagging feel like a stream.
+  const dropCurrent = useCallback(
+    () =>
+      setBox((b) => {
+        if (!b) return b;
+        const items = b.items.filter((_, idx) => idx !== b.i);
+        return items.length ? { ...b, items, i: Math.min(b.i, items.length - 1) } : null;
+      }),
+    [],
+  );
+
+  const act = useCallback(
+    async (fn?: (id: string) => void | Promise<unknown>) => {
+      if (!box || !fn || busy) return;
+      setBusy(true);
+      try {
+        await fn(box.items[box.i].id);
+        dropCurrent();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [box, busy, dropCurrent],
+  );
+
   useEffect(() => {
     if (!box) return;
     const onKey = (e: KeyboardEvent) => {
@@ -58,19 +97,20 @@ export function LightboxProvider({ children }: { children: ReactNode }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [box, close, step]);
 
-  const many = (box?.srcs.length ?? 0) > 1;
+  const many = (box?.items.length ?? 0) > 1;
+  const taggable = !!(box?.opts?.onTag || box?.opts?.onDelete);
   return (
     <LightboxCtx.Provider value={open}>
       {children}
       {box && (
         <div
           onClick={close}
-          className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-sm grid place-items-center p-4"
+          className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-sm flex flex-col items-center justify-center gap-4 p-4"
         >
           <img
-            src={box.srcs[box.i]}
+            src={box.items[box.i].src}
             onClick={(e) => e.stopPropagation()}
-            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            className="max-w-full min-h-0 flex-1 object-contain rounded-lg shadow-2xl"
             alt="snapshot"
           />
           <button onClick={close} className="btn btn-sm absolute top-4 right-4 bg-black/60" title="close">✕</button>
@@ -78,11 +118,29 @@ export function LightboxProvider({ children }: { children: ReactNode }) {
             <>
               <button onClick={(e) => { e.stopPropagation(); step(-1); }} className="btn absolute left-4 top-1/2 -translate-y-1/2 bg-black/60 !px-3 text-xl" title="previous">‹</button>
               <button onClick={(e) => { e.stopPropagation(); step(1); }} className="btn absolute right-4 top-1/2 -translate-y-1/2 bg-black/60 !px-3 text-xl" title="next">›</button>
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-white/80 bg-black/60 px-3 py-1 rounded-full">
-                {box.i + 1} / {box.srcs.length}
-              </div>
             </>
           )}
+          {taggable && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 flex flex-wrap items-center justify-center gap-2 bg-black/70 rounded-xl px-3 py-2"
+            >
+              <span className="text-xs text-white/70 mr-1">Tag as</span>
+              {box.opts?.tags?.map((t) => (
+                <button key={t.to} disabled={busy} onClick={() => act((id) => box.opts!.onTag?.(id, t.to))} className="btn btn-sm">
+                  {t.label}
+                </button>
+              ))}
+              {box.opts?.onDelete && (
+                <button disabled={busy} onClick={() => act((id) => box.opts!.onDelete?.(id))} className="btn btn-sm btn-danger" title="delete">
+                  ✕ Discard
+                </button>
+              )}
+            </div>
+          )}
+          <div className="shrink-0 text-xs text-white/80 bg-black/60 px-3 py-1 rounded-full">
+            {box.i + 1} / {box.items.length}
+          </div>
         </div>
       )}
     </LightboxCtx.Provider>

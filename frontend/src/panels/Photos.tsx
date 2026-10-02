@@ -28,6 +28,13 @@ function PhotoGrid({
     await api.post(`/api/photos/${set}/${animal}/${encodeURIComponent(n)}/retag?to=${to}`);
     toast("Re‑tagged as " + (names[to] || to)); load();
   }
+  // Open the enlarged viewer with tag/delete controls so a batch can be tagged in the big view.
+  const openAt = (i: number) =>
+    lightbox(data.files.map((n) => ({ src: src(n), id: n })), i, {
+      tags: others.map((o) => ({ to: o, label: names[o] || o })),
+      onTag: (n, to) => retag(n, to),
+      onDelete: (n) => del(n),
+    });
 
   if (!data.files.length) return <div className="text-muted text-xs">none yet</div>;
   return (
@@ -37,9 +44,9 @@ function PhotoGrid({
           <img
             loading="lazy"
             src={src(n)}
-            onClick={() => lightbox(data.files.map(src), i)}
+            onClick={() => openAt(i)}
             className="w-full h-full object-cover cursor-zoom-in"
-            title="click to enlarge"
+            title="click to enlarge & tag"
           />
           <div className="absolute inset-x-0 bottom-0 flex flex-wrap justify-center gap-1 p-1 bg-black/75
                           opacity-100 md:opacity-0 md:group-hover:opacity-100 transition">
