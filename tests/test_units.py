@@ -139,3 +139,78 @@ def test_missing_camera_or_mac_is_an_error_not_a_guess() -> None:
         resolve_stream_url("rtsp://{host}/s", CAM_MAC, lookup=lambda m: None, rescan=lambda p: None)
     with pytest.raises(RuntimeError, match="KASA_CAMERA_MAC"):
         resolve_stream_url("rtsp://{host}/s", "")
+
+
+def test_feeder_auto_logs_in_when_no_token(monkeypatch) -> None:
+    """A missing/expired token self-heals: the wrapper runs `login` and retries once."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from animaleyes.feeder import PetlibroCli
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        sub = cmd[1]
+        if sub == "status" and calls.count(["petlibro-cli", "status", "AF0"]) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="error: No cached token. Run `petlibro-cli login` first.",
+            )
+        if sub == "login":
+            return SimpleNamespace(returncode=0, stdout="Logged in", stderr="")
+        return SimpleNamespace(returncode=0, stdout='{"platePosition": 2}', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert PetlibroCli("AF0").current_plate() == 2
+    subs = [c[1] for c in calls]
+    assert subs == ["status", "login", "status"]  # failed, logged in, retried
+
+
+def test_feeder_raises_on_non_auth_error(monkeypatch) -> None:
+    import subprocess
+    from types import SimpleNamespace
+
+    from animaleyes.feeder import FeederError, PetlibroCli
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="code=1005 msg=No resource access")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    try:
+        PetlibroCli("AF0").current_plate()
+        raise AssertionError("expected FeederError")
+    except FeederError as exc:
+        assert "No resource access" in str(exc)
+
+
+def test_camera_credentials_parsed_from_rtsp_url() -> None:
+    from animaleyes.events import camera_credentials
+
+    # URL-encoded special chars must round-trip; value is a dummy, not a real credential.
+    assert camera_credentials("rtsp://admin:p%40ss%21word@10.0.0.8:554/x") == (
+        "admin",
+        "p@ss!word",
+    )
+
+
+def test_events_apply_tracks_motion_and_animal() -> None:
+    from datetime import datetime
+
+    from animaleyes.events import ReolinkEvents
+
+    e = ReolinkEvents("rtsp://admin:pw@10.0.0.8:554/x", "aa:bb:cc:dd:ee:ff")
+    e._apply(
+        "<wsnt:NotificationMessage><wsnt:Topic>tns1:RuleEngine/CellMotionDetector/Motion"
+        '</wsnt:Topic><SimpleItem Name="IsMotion" Value="true"/></wsnt:NotificationMessage>'
+    )
+    assert e.motion_state is True
+    assert e.motion_within(datetime.now(), 60) is True
+
+    e._apply(
+        "<wsnt:NotificationMessage><wsnt:Topic>tns1:RuleEngine/MyRuleDetector/DogCatDetect"
+        '</wsnt:Topic><SimpleItem Name="State" Value="true"/></wsnt:NotificationMessage>'
+    )
+    assert e.animal_state is True

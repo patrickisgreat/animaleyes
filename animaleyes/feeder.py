@@ -15,7 +15,10 @@ from typing import Protocol
 
 log = logging.getLogger(__name__)
 
-TOKEN_EXPIRED = "code 1009"
+# Signs that the box needs to (re)authenticate: an expired/invalid token (code 1009) or no
+# cached token yet (first run, or the token volume was reset). Both are safe to recover from
+# by logging in and retrying, because they fail before the feeder action runs.
+TOKEN_ERRORS = ("code 1009", "No cached token", "login` first", "Token expired")
 
 
 class FeederError(Exception):
@@ -48,10 +51,12 @@ class PetlibroCli:
         if proc.returncode == 0:
             return proc.stdout
         stderr = proc.stderr.strip()
-        if TOKEN_EXPIRED in stderr and relogin:
-            # POC: re-login signs the phone app out of this PetLibro account. Use a second
-            # shared account for the box so this is harmless.
-            log.warning("petlibro token expired; logging in again")
+        if relogin and any(sign in stderr for sign in TOKEN_ERRORS):
+            # Self-heal auth: no token yet, or an expired/invalid one. Safe to log in and
+            # retry once because these errors occur before the feeder action runs, so no
+            # double-feed. POC: re-login signs the phone app out of this PetLibro account;
+            # use a second shared account for the box so this is harmless.
+            log.warning("petlibro auth needed; logging in and retrying")
             self._run("login", relogin=False)
             return self._run(*args, relogin=False)
         raise FeederError(f"{' '.join(cmd)} failed: {stderr[-300:]}")

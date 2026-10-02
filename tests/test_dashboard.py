@@ -27,7 +27,14 @@ def client(h: Harness) -> TestClient:
         dash_password=PASSWORD,
         dash_public_url="http://dash",
     )
-    app = create_app(h.machine, h.store, h.config, secrets, h.tmp_path / "frames")
+    app = create_app(
+        h.machine,
+        h.store,
+        h.config,
+        secrets,
+        h.tmp_path / "frames",
+        reference_dir=h.tmp_path / "reference",
+    )
     c = TestClient(app)
     c.auth = ("me", PASSWORD)
     return c
@@ -124,3 +131,48 @@ def test_feed_now_and_event_page(h: Harness) -> None:
     assert page.status_code == 200 and "manual feed" in page.text
     assert c.get(f"/frames/{open_event['frames'][0]}").status_code == 200
     assert c.get("/frames/../config.toml").status_code in (404, 400)
+
+
+def test_feeder_buttons_enqueue_requests_through_the_machine(h: Harness) -> None:
+    c = client(h)
+    for action in ("open", "close", "rotate"):
+        assert c.post(f"/api/feeder/{action}").status_code == 200
+        assert h.store.get(f"manual_{action}_requested")  # flag set for the machine
+    assert c.post("/api/feeder/explode").status_code == 400
+
+
+def test_reference_upload_saves_and_is_counted(h: Harness) -> None:
+    c = client(h)
+    r = c.post("/api/reference/grrr?filename=test.jpg", content=b"\xff\xd8\xff\xd9jpegbytes")
+    assert r.status_code == 200
+    assert (h.tmp_path / "reference" / "grrr" / "test.jpg").read_bytes().startswith(b"\xff\xd8")
+    assert c.post("/api/reference/dragon?filename=x.jpg", content=b"x").status_code == 400
+    assert c.post("/api/reference/grrr?filename=empty.jpg", content=b"").status_code == 400
+
+
+def test_reference_capture_uses_the_latest_frame(h: Harness) -> None:
+    c = client(h)
+    assert c.post("/api/reference/cat/capture").status_code == 404  # no frame yet
+    h.push_frame()
+    r = c.post("/api/reference/cat/capture")
+    assert r.status_code == 200
+    saved = list((h.tmp_path / "reference" / "cat").glob("cam-*.jpg"))
+    assert len(saved) == 1
+
+
+def test_status_reports_lid_and_current_plate(h: Harness) -> None:
+    c = client(h)
+    h.load_plates(1, 2)
+    s0 = c.get("/api/status").json()
+    assert s0["lid_open"] is False
+    # Manual open (dry run) sets the lid-open flag and records the plate.
+    h.config.update({"DRY_RUN": True})
+    h.machine.request_manual_action("open")
+    h.tick(motion=False)
+    s1 = c.get("/api/status").json()
+    assert s1["lid_open"] is True
+    assert s1["current_plate"] == 1
+    # Manual close clears it.
+    h.machine.request_manual_action("close")
+    h.tick(motion=False)
+    assert c.get("/api/status").json()["lid_open"] is False

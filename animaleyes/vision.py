@@ -45,6 +45,12 @@ Rules:
 - At night the camera uses infrared and the image is greyscale: a black coat is NOT a cue.
   Use body size, leg length, body proportions, ear and muzzle shape, and posture.
 - Bowie is much larger and lankier than Grrr. Grrr is small and low to the ground.
+- POC fallback when few or no reference photos are provided: identify by species and size
+  alone. The ONLY small dog in this home is Grrr, so classify any clearly small dog as
+  "grrr", a clearly larger or lankier dog as "bowie", and a cat as "cat". A cat is not a
+  small dog: tell them apart by the cat's shorter muzzle, triangular upright ears, long
+  tail, and lighter, more fluid gait. If you cannot tell a small dog from a cat, choose
+  "unsure" — never feed on a guess.
 - "at_bowl" is true only when the animal's head is at or in the bowl area, not merely nearby.
 - Answer with a single JSON object matching the schema you were given, nothing else."""
 

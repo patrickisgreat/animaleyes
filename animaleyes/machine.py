@@ -61,11 +61,13 @@ class Machine:
         clock: Callable[[], datetime],
         frames_dir: Path,
         dashboard_url: str = "",
+        events=None,
     ):
         self.config = config
         self.store = store
         self.frames = frames
         self.motion = motion
+        self.events = events
         self.llm = llm
         self.real_feeder = feeder
         self.dry_feeder = dry_feeder
@@ -191,6 +193,7 @@ class Machine:
         try:
             plate = self._plate_under_lid(feeder)
             self.store.set("opening_plate", plate)
+            self.store.set("current_plate", plate)
             feeder.open_now(plate)
         except FeederError as exc:
             event_id = self.store.add_event(
@@ -327,7 +330,18 @@ class Machine:
 
     # helpers -----------------------------------------------------------
     def _motion(self, now: datetime) -> bool:
-        return self.motion.motion_within(now, self.settings.MOTION_HOLD_S)
+        hold_s = self.settings.MOTION_HOLD_S
+        # Prefer the camera's own motion/animal events (cheap, selective) so the LLM only
+        # wakes when the camera sees something. Fall back to frame-differencing if the event
+        # source is unavailable or its subscription is currently failing, so a broken ONVIF
+        # link can never silently stop the dog from being fed.
+        if (
+            self.events is not None
+            and self.settings.MOTION_SOURCE == "camera"
+            and getattr(self.events, "last_error", "unset") is None
+        ):
+            return self.events.motion_within(now, hold_s)
+        return self.motion.motion_within(now, hold_s)
 
     def _llm_due(self, now: datetime, interval_s: float) -> bool:
         return self.last_llm_at is None or now - self.last_llm_at >= timedelta(seconds=interval_s)
@@ -448,6 +462,15 @@ class Machine:
                     {"loaded_plates": self.store.loaded_plates()},
                 )
                 self._transition(State.IDLE, "plates set from dashboard")
+        # Manual feeder controls from the dashboard. Per the invariant, the page only sets
+        # these flags; the machine is still the sole caller of the feeder. POC: these are
+        # raw maintenance actions (open/close/rotate the tray by hand); they log an event and
+        # honour DRY_RUN but deliberately do not touch the feeding counters or FSM state.
+        for action in ("open", "close", "rotate"):
+            if self.store.get(f"manual_{action}_requested"):
+                self.store.set(f"manual_{action}_requested", None)
+                self._manual_action(now, action)
+
         if self.store.get("feed_now_requested"):
             self.store.set("feed_now_requested", None)
             if self.state in (State.FEEDING, State.CLOSING, State.OPENING):
@@ -456,8 +479,42 @@ class Machine:
             self._transition(State.OPENING, "manual feed from dashboard")
             self._tick_opening(now, trigger="manual feed from dashboard")
 
+    def _manual_action(self, now: datetime, action: str) -> None:
+        feeder = self._feeder()
+        mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
+        try:
+            if action == "open":
+                plate = self._plate_under_lid(feeder)
+                feeder.open_now(plate)
+                self.store.set("current_plate", plate)
+                self.store.set("lid_manual_open", 1)
+                detail = {"mode": mode, "plate": plate}
+            elif action == "close":
+                feeder.close()
+                self.store.set("lid_manual_open", None)
+                detail = {"mode": mode}
+            else:  # rotate
+                feeder.rotate()
+                plate = feeder.current_plate()
+                self.store.set("current_plate", plate)
+                detail = {"mode": mode, "plate": plate}
+        except FeederError as exc:
+            event_id = self.store.add_event(
+                now, f"manual_{action}_failed", str(exc), {"mode": mode}
+            )
+            self._notify(f"manual {action} FAILED ({mode}): {exc}", event_id)
+            return
+        event_id = self.store.add_event(now, f"manual_{action}", f"dashboard ({mode})", detail)
+        self._notify(f"manual {action} ({mode})", event_id)
+
     def request_feed_now(self) -> None:
         self.store.set("feed_now_requested", 1)
+
+    def request_manual_action(self, action: str) -> None:
+        """Enqueue a raw open/close/rotate for the machine to perform on its next tick."""
+        if action not in ("open", "close", "rotate"):
+            raise ValueError(f"unknown feeder action {action!r}")
+        self.store.set(f"manual_{action}_requested", 1)
 
     def _status_data(self) -> dict[str, Any]:
         return {

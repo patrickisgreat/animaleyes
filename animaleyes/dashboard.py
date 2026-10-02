@@ -58,6 +58,12 @@ MAIN_EVENT_KINDS = (
     "camera_online",
     "plates_set",
     "grrr_blocked",
+    "manual_open",
+    "manual_close",
+    "manual_rotate",
+    "manual_open_failed",
+    "manual_close_failed",
+    "manual_rotate_failed",
 )
 
 
@@ -68,8 +74,10 @@ def create_app(
     secrets: Secrets,
     frames_dir: Path,
     reload_references=None,
+    reference_dir: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
+    ANIMALS = ("grrr", "bowie", "cat")
 
     def auth(credentials: Credentials) -> None:
         # Fail closed: with no password configured, nobody gets in.
@@ -120,6 +128,19 @@ def create_app(
             "plates": store.plates(),
             "loaded_plates": store.loaded_plates(),
             "feeds_this_window": store.get_int("feeds_this_window"),
+            "last_open_at": store.get("last_open_at"),
+            "motion_source": settings.MOTION_SOURCE,
+            "camera_motion": getattr(machine.events, "motion_state", None),
+            "camera_animal": getattr(machine.events, "animal_state", None),
+            "camera_events_ok": (machine.events.last_error is None)
+            if machine.events is not None
+            else None,
+            "lid_open": machine.state in ("OPENING", "FEEDING", "CLOSING")
+            or bool(store.get("lid_manual_open")),
+            "current_plate": store.get_int("current_plate", 0) or None,
+            "feeding_plate": store.get_int("feeding_plate", 0) or None
+            if machine.state == "FEEDING"
+            else None,
             "next_allowed_feed": next_feed.isoformat(timespec="seconds") if next_feed else None,
             "next_allowed_feed_in_s": max(0, int((next_feed - now).total_seconds()))
             if next_feed
@@ -167,6 +188,49 @@ def create_app(
     def feed_now() -> dict[str, str]:
         machine.request_feed_now()
         return {"ok": "feed requested; the state machine opens on its next tick"}
+
+    @app.post("/api/feeder/{action}", dependencies=guarded)
+    def feeder_action(action: str) -> dict[str, str]:
+        # The page only enqueues the request; the state machine is still the sole caller of
+        # the feeder and performs it on its next tick (product invariant).
+        try:
+            machine.request_manual_action(action)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": f"{action} requested; the state machine runs it on its next tick"}
+
+    def _animal_dir(animal: str) -> Path:
+        if animal not in ANIMALS or reference_dir is None:
+            raise HTTPException(status_code=400, detail="unknown animal")
+        d = reference_dir / animal
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _save_reference(animal: str, name: str, jpeg: bytes) -> dict[str, Any]:
+        safe = Path(name).name or "frame.jpg"
+        if not safe.lower().endswith((".jpg", ".jpeg", ".png")):
+            safe += ".jpg"
+        (_animal_dir(animal) / safe).write_bytes(jpeg)
+        if reload_references:
+            reload_references()
+        return {"saved": safe, "reference_counts": getattr(machine.llm, "reference_counts", {})}
+
+    @app.post("/api/reference/{animal}", dependencies=guarded)
+    async def upload_reference(animal: str, request: Request) -> dict[str, Any]:
+        # Raw image bytes in the body (no multipart dependency); filename in the query.
+        name = request.query_params.get("filename", "upload.jpg")
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="empty upload")
+        return _save_reference(animal, name, body)
+
+    @app.post("/api/reference/{animal}/capture", dependencies=guarded)
+    def capture_reference(animal: str) -> dict[str, Any]:
+        frames = machine.frames.latest(1)
+        if not frames:
+            raise HTTPException(status_code=404, detail="no camera frame yet")
+        name = f"cam-{datetime.now().strftime('%Y%m%d-%H%M%S')}.jpg"
+        return _save_reference(animal, name, frames[0].jpeg)
 
     @app.post("/api/reload-references", dependencies=guarded)
     def reload_refs() -> dict[str, Any]:
@@ -285,7 +349,7 @@ PAGE = """<!doctype html>
  .k{color:var(--muted);font-size:13px}
  .v{font-weight:600;word-break:break-word}
  .state{font-size:28px;font-weight:800}
- .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+ .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
  img#live{width:100%;border-radius:8px;background:#000;min-height:120px}
  .overlay{position:relative}
  .overlay pre{position:absolute;left:8px;bottom:8px;margin:0;background:rgba(0,0,0,.65);color:#fff;
@@ -317,11 +381,29 @@ PAGE = """<!doctype html>
 </div>
 
 <div class="card">
+  <div class="k">Feeder</div>
+  <div class="grid" id="feeder"></div>
+  <div style="margin-top:8px">
+    <button onclick="feeder('open')">Open</button>
+    <button class="plain" onclick="feeder('close')">Close</button>
+    <button class="plain" onclick="feeder('rotate')">Rotate</button>
+    <button class="danger" onclick="feedNow()">Feed now</button>
+  </div>
+  <small>Buttons send a request; the state machine runs it on its next tick and logs it. Honors DRY_RUN.</small>
+</div>
+
+<div class="card">
   <div class="k">Plates loaded (tap to toggle, then Save — resets counters and returns to IDLE)</div>
   <div class="plates" id="plates"></div>
   <button onclick="savePlates()">Save plates</button>
+</div>
+
+<div class="card">
+  <div class="k">Reference photos (what the model recognizes each animal by)</div>
+  <div class="grid" id="refcounts"></div>
+  <div id="refupload" style="margin-top:8px"></div>
   <button class="plain" onclick="reloadRefs()">Reload reference photos</button>
-  <button class="danger" onclick="feedNow()">Feed now</button>
+  <small>Upload clear photos of each animal. Use "Grab frame" at night to capture IR reference shots from this camera — the black coat is invisible in IR, so night ID relies on size/shape.</small>
 </div>
 
 <div class="card">
@@ -342,7 +424,7 @@ const CONTROLS = [
   ["MIN_GAP_MIN","number"],["LEAVE_TIMEOUT_S","number"],["FEEDING_MAX_MIN","number"],
   ["FEEDING_POLL_S","number"],["CONFIRMATIONS_REQUIRED","number"],["GRRR_MIN_CONF","number"],
   ["MOTION_PIXEL_FRACTION","number"],["MOTION_HOLD_S","number"],["LLM_MIN_INTERVAL_S","number"],
-  ["HEARTBEAT_MIN","number"],["LLM_MODEL","text"]];
+  ["HEARTBEAT_MIN","number"],["LLM_MODEL","text"],["MOTION_SOURCE","text"]];
 let plates = {};
 const fmt = (s) => s == null ? "—" : (s < 90 ? s + "s" : Math.round(s/60) + "m");
 
@@ -360,6 +442,7 @@ async function refresh() {
     ["Heartbeat age", fmt(s.heartbeat_age_s)],
     ["Camera frame age", s.camera_age_s == null ? "no frames" : fmt(s.camera_age_s)],
     ["Motion", s.motion_fraction],
+    ["Camera motion", s.motion_source !== "camera" ? "(frame-diff)" : (s.camera_events_ok === false ? "⚠ events down → frame-diff" : ((s.camera_motion ? "motion " : "") + (s.camera_animal ? "🐾 animal" : (s.camera_motion ? "" : "quiet"))))],
     ["LLM today", s.llm_calls_today + " calls · $" + s.llm_cost_today_usd.toFixed(3)],
     ["Model", s.llm_model],
     ["Reference photos", Object.entries(s.reference_counts).map(([a,n]) => a + ":" + n).join(" ")],
@@ -370,6 +453,46 @@ async function refresh() {
     ? (s.last_llm_at || "") + "\\n" + JSON.stringify(s.last_verdict) : "no LLM verdict yet";
   if (!live) document.getElementById("live").src = "/frame.jpg?t=" + Date.now();
   if (!Object.keys(plates).length) { plates = s.plates; renderPlates(); }
+  const lid = s.lid_open ? '<span class="ok">● OPEN</span>' : '<span class="muted">○ closed</span>';
+  const frows = [
+    ["Lid", lid],
+    ["Current plate", s.current_plate ? ("plate " + s.current_plate) : "unknown"],
+    ["Mode", s.dry_run ? '<span class="warn">DRY RUN (logs only)</span>' : '<span class="ok">LIVE</span>'],
+    ["State", s.state],
+    ["Loaded plates", (s.loaded_plates && s.loaded_plates.length) ? s.loaded_plates.join(", ") : "none"],
+    ["Feeds this window", s.feeds_this_window],
+    ["Last open", s.last_open_at ? s.last_open_at.replace("T"," ") : "never"],
+    ["Next feed allowed", s.next_allowed_feed_in_s ? "in " + fmt(s.next_allowed_feed_in_s) : "now"],
+  ];
+  document.getElementById("feeder").innerHTML = frows.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
+  renderRefs(s.reference_counts || {});
+}
+const ANIMALS = ["grrr","bowie","cat"];
+function renderRefs(counts) {
+  document.getElementById("refcounts").innerHTML = ANIMALS.map(a => `<div class="k">${a}</div><div class="v">${counts[a]||0} photos</div>`).join("");
+  if (document.getElementById("refupload").dataset.built) return;
+  document.getElementById("refupload").dataset.built = "1";
+  document.getElementById("refupload").innerHTML = ANIMALS.map(a =>
+    `<div style="padding:4px 0"><b>${a}</b>: <input type="file" accept="image/*" multiple id="f_${a}" onchange="uploadRefs('${a}')"> <button class="plain" onclick="grabRef('${a}')">Grab frame</button></div>`).join("");
+}
+async function uploadRefs(a) {
+  const el = document.getElementById("f_"+a);
+  for (const file of el.files) {
+    const buf = await file.arrayBuffer();
+    await fetch(q("/api/reference/"+a+"?filename="+encodeURIComponent(file.name)), {method:"POST", headers:{"Content-Type":"application/octet-stream"}, body: buf});
+  }
+  el.value = ""; alert("uploaded to " + a); refresh();
+}
+async function grabRef(a) {
+  const r = await fetch(q("/api/reference/"+a+"/capture"), {method:"POST"});
+  if (!r.ok) { alert("grab failed: " + (await r.text())); return; }
+  const j = await r.json(); alert("saved " + j.saved + " to " + a); refresh();
+}
+async function feeder(action) {
+  if (!confirm(action.toUpperCase() + " the feeder now? (runs on the next tick; honors DRY_RUN)")) return;
+  await fetch(q("/api/feeder/"+action), {method:"POST"});
+  // Poll a few times so the panel reflects the result as soon as the machine runs it.
+  for (let i=0;i<6;i++){ setTimeout(refresh, i*700); }
 }
 function renderPlates() {
   document.getElementById("plates").innerHTML = [1,2,3].map(p =>
@@ -422,7 +545,7 @@ document.getElementById("live").onerror = () => { if (live) setTimeout(startLive
 document.addEventListener("visibilitychange", () => { if (live && !document.hidden) startLive(); });
 startLive();
 refresh(); loadConfig(); loadEvents();
-setInterval(refresh, 3000); setInterval(loadEvents, 15000);
+setInterval(refresh, 1500); setInterval(loadEvents, 15000);
 </script></body></html>
 """
 

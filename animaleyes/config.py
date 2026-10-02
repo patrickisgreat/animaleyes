@@ -30,6 +30,7 @@ class Settings:
     GRRR_MIN_CONF: float = 0.8
     MOTION_PIXEL_FRACTION: float = 0.02
     MOTION_HOLD_S: int = 20
+    MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
     LLM_MIN_INTERVAL_S: int = 3
     HEARTBEAT_MIN: int = 5
     LLM_MODEL: str = "claude-opus-5"

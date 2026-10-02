@@ -14,3 +14,8 @@ petlibro-cli/.env
 petlibro-cli/.venv/
 .toolkit/
 config/
+
+# Reference photos are personal (pets/home); keep them local on a public repo.
+data/reference/**/*.jpg
+data/reference/**/*.jpeg
+data/reference/**/*.png

@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from .camera import Camera, FrameBuffer
 from .config import DEFAULT_CONFIG_PATH, ConfigStore, Secrets
 from .dashboard import create_app
+from .events import ReolinkEvents
 from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
@@ -51,13 +52,19 @@ class UnavailableFeeder:
         raise FeederError(self.error)
 
 
-def build(secrets: Secrets) -> tuple[Machine, Camera, ConfigStore, Store, ClaudeIdentifier]:
+def build(
+    secrets: Secrets,
+) -> tuple[Machine, Camera, ConfigStore, Store, ClaudeIdentifier, ReolinkEvents | None]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
     frames = FrameBuffer()
     motion = MotionDetector()
     camera = Camera(secrets, frames, on_frame=motion.feed)
     llm = ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+    events: ReolinkEvents | None = None
+    if secrets.kasa_stream_url:
+        # Camera-driven motion gate (ONVIF). Keeps the LLM from firing on frame-diff noise.
+        events = ReolinkEvents(secrets.kasa_stream_url, secrets.kasa_camera_mac)
     try:
         feeder = PetlibroCli(secrets.petlibro_serial)
     except FeederError as exc:
@@ -75,8 +82,9 @@ def build(secrets: Secrets) -> tuple[Machine, Camera, ConfigStore, Store, Claude
         clock=datetime.now,
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
+        events=events,
     )
-    return machine, camera, config, store, llm
+    return machine, camera, config, store, llm, events
 
 
 def run_loop(machine: Machine, stop: threading.Event) -> None:
@@ -101,9 +109,11 @@ def main() -> None:
     secrets = Secrets.from_env()
     if not (secrets.dash_user and secrets.dash_password):
         raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
-    machine, camera, config, store, llm = build(secrets)
+    machine, camera, config, store, llm, events = build(secrets)
     if secrets.kasa_stream_url:
         camera.start()
+        if events is not None:
+            events.start()
     else:
         log.warning("KASA_STREAM_URL is not set; running without a camera")
     machine.start()
@@ -117,6 +127,7 @@ def main() -> None:
         secrets,
         DATA_DIR / "frames",
         reload_references=llm.reload_references,
+        reference_dir=DATA_DIR / "reference",
     )
     try:
         uvicorn.run(
@@ -128,6 +139,8 @@ def main() -> None:
     finally:
         stop.set()
         camera.stop()
+        if events is not None:
+            events.stop()
         worker.join(timeout=5)
 
 
