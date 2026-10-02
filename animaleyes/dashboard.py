@@ -369,222 +369,427 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>animaleyes</title>
 <style>
- :root{--bg:#111;--fg:#eee;--muted:#999;--card:#1c1c1c;--ok:#4caf50;--warn:#ff9800;--bad:#f44336;--accent:#6aa9ff}
- body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif;padding:12px}
- h1{font-size:20px;margin:0 0 12px}
- .card{background:var(--card);border-radius:10px;padding:12px;margin-bottom:12px}
- .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px}
- .k{color:var(--muted);font-size:13px}
- .v{font-weight:600;word-break:break-word}
- .state{font-size:28px;font-weight:800}
- .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
- img#live{width:100%;border-radius:8px;background:#000;min-height:120px}
- .overlay{position:relative}
- .overlay pre{position:absolute;left:8px;bottom:8px;margin:0;background:rgba(0,0,0,.65);color:#fff;
-   padding:6px 8px;border-radius:6px;font-size:12px;max-width:90%;white-space:pre-wrap}
- label{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #2a2a2a}
- input[type=text],input[type=number]{width:110px;background:#222;color:#fff;border:1px solid #444;border-radius:6px;padding:6px;font-size:16px}
- button{background:var(--accent);color:#000;border:0;border-radius:8px;padding:10px 14px;font-weight:700;font-size:15px;margin:6px 6px 0 0}
- button.danger{background:var(--bad);color:#fff}
- button.plain{background:#333;color:#fff}
- .ev{border-bottom:1px solid #2a2a2a;padding:8px 0}
+ :root{
+   --bg:#0e0f13;--surface:#171920;--surface2:#1f222c;--border:#2a2e3a;
+   --fg:#e7e9ef;--muted:#949aa7;--accent:#6aa9ff;--accent-ink:#06142b;
+   --ok:#3ad68a;--warn:#ffb454;--bad:#ff5c66;--radius:14px;
+ }
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--fg);
+   font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+ .wrap{max-width:1080px;margin:0 auto;padding:16px}
+ header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+ header h1{font-size:19px;font-weight:800;margin:0;letter-spacing:.2px}
+ header h1 .paw{opacity:.9}
+ .badge{font-size:12px;font-weight:700;padding:4px 9px;border-radius:999px;border:1px solid var(--border)}
+ .badge.live{background:rgba(58,214,138,.12);color:var(--ok);border-color:rgba(58,214,138,.3)}
+ .badge.dry{background:rgba(255,180,84,.12);color:var(--warn);border-color:rgba(255,180,84,.3)}
+ .badge.off{background:rgba(255,92,102,.12);color:var(--bad);border-color:rgba(255,92,102,.3)}
+ .spacer{flex:1}
+ .cols{display:grid;gap:16px;grid-template-columns:1fr}
+ @media(min-width:880px){.cols{grid-template-columns:1.25fr 1fr;align-items:start}}
+ .col{display:grid;gap:16px;min-width:0}
+ .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+ .card h2{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+   color:var(--muted);margin:0 0 12px}
+ /* state banner */
+ .state{display:flex;align-items:center;gap:12px}
+ .dot{width:12px;height:12px;border-radius:50%;flex:none;background:var(--muted);box-shadow:0 0 0 4px rgba(255,255,255,.04)}
+ .dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}.dot.accent{background:var(--accent)}
+ .state .big{font-size:22px;font-weight:800;line-height:1.1}
+ .state .sub{color:var(--muted);font-size:13px;margin-top:2px}
+ /* live */
+ .live-wrap{position:relative;border-radius:12px;overflow:hidden;background:#000;aspect-ratio:16/9}
+ .live-wrap img{width:100%;height:100%;object-fit:cover;display:block}
+ .live-chip{position:absolute;top:10px;left:10px;display:flex;gap:6px;align-items:center;
+   background:rgba(8,10,14,.7);backdrop-filter:blur(4px);padding:5px 10px;border-radius:999px;font-size:12px;font-weight:700}
+ .live-verdict{position:absolute;left:10px;right:10px;bottom:10px;background:rgba(8,10,14,.72);
+   backdrop-filter:blur(4px);padding:8px 11px;border-radius:10px;font-size:13px}
+ .live-verdict .who{font-weight:700}.live-verdict .why{color:var(--muted);font-size:12px;margin-top:2px}
+ .live-btn{position:absolute;top:10px;right:10px}
+ /* stat tiles */
+ .tiles{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
+ .tile{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+ .tile .l{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+ .tile .val{font-size:17px;font-weight:700;margin-top:3px;word-break:break-word}
+ /* feeder */
+ .lidrow{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+ .pill{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;
+   font-weight:700;font-size:13px;border:1px solid var(--border);background:var(--surface2)}
+ .pill.open{color:var(--ok);border-color:rgba(58,214,138,.35)}
+ .pill.closed{color:var(--muted)}
+ .btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+ button{font:inherit;font-weight:700;border:1px solid var(--border);background:var(--surface2);color:var(--fg);
+   border-radius:10px;padding:10px 14px;min-height:42px;cursor:pointer;transition:.12s}
+ button:hover{border-color:#3a4150}button:active{transform:translateY(1px)}
+ button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+ button.danger{background:rgba(255,92,102,.14);color:var(--bad);border-color:rgba(255,92,102,.35)}
+ button.sm{padding:7px 11px;min-height:36px;font-size:13px}
+ .chips{display:flex;gap:8px;flex-wrap:wrap}
+ .chip{padding:9px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface2);
+   font-weight:700;cursor:pointer;min-height:42px;display:flex;align-items:center;gap:7px}
+ .chip.on{background:rgba(58,214,138,.14);color:var(--ok);border-color:rgba(58,214,138,.35)}
+ .chip .pn{opacity:.7;font-size:12px}
+ .hint{color:var(--muted);font-size:12px;margin-top:10px}
+ /* events */
+ .evlist{display:flex;flex-direction:column}
+ .ev{display:flex;gap:11px;padding:10px 0;border-bottom:1px solid var(--border);align-items:flex-start}
+ .ev:last-child{border-bottom:0}
+ .ev .ico{width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;
+   background:var(--surface2);font-size:14px}
+ .ev .body{min-width:0;flex:1}
+ .ev .title{font-weight:700;font-size:14px}
+ .ev .meta{color:var(--muted);font-size:12px;margin-top:1px;word-break:break-word}
  .ev a{color:var(--accent);text-decoration:none}
- .ev .kind{font-weight:700}
- .ev .when{color:var(--muted);font-size:12px}
- .plates button{margin-right:6px}
- .plates .on{background:var(--ok)}
- small{color:var(--muted)}
+ .toggle{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer}
+ /* refs + settings */
+ .refgrid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+ .ref{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:11px}
+ .ref .name{font-weight:700;text-transform:capitalize}
+ .ref .cnt{color:var(--muted);font-size:12px;margin:2px 0 8px}
+ .ref input[type=file]{font-size:12px;width:100%;color:var(--muted)}
+ details{border-top:1px solid var(--border);margin-top:4px}
+ details summary{cursor:pointer;padding:12px 0 4px;font-size:12px;font-weight:700;
+   text-transform:uppercase;letter-spacing:.08em;color:var(--muted);list-style:none}
+ details summary::-webkit-details-marker{display:none}
+ details summary::after{content:" ▾";opacity:.6}
+ details[open] summary::after{content:" ▴"}
+ .setgrp{margin:12px 0 4px;color:var(--accent);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+ .field{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}
+ .field label{font-size:14px}.field .d{color:var(--muted);font-size:12px}
+ .field input,.field select{background:var(--bg);color:var(--fg);border:1px solid var(--border);
+   border-radius:8px;padding:8px;font-size:16px;min-width:120px;max-width:160px}
+ .field input[type=checkbox]{min-width:auto;width:20px;height:20px}
+ .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);
+   background:var(--surface2);border:1px solid var(--border);color:var(--fg);padding:11px 16px;
+   border-radius:10px;font-size:14px;font-weight:600;opacity:0;transition:.25s;pointer-events:none;z-index:50;max-width:90vw}
+ .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+ .toast.err{border-color:rgba(255,92,102,.5);color:var(--bad)}
 </style></head><body>
-<h1>animaleyes <small id="mode"></small></h1>
+<div class="wrap">
+  <header>
+    <h1><span class="paw">🐾</span> animaleyes</h1>
+    <span class="spacer"></span>
+    <span class="badge" id="modeBadge">—</span>
+    <span class="badge" id="camBadge">—</span>
+  </header>
 
-<div class="card">
-  <div class="state" id="state">…</div>
-  <div class="grid" id="status"></div>
-</div>
+  <div class="cols">
+    <div class="col">
+      <div class="card">
+        <div class="state"><span class="dot" id="stateDot"></span>
+          <div><div class="big" id="stateBig">…</div><div class="sub" id="stateSub"></div></div></div>
+      </div>
 
-<div class="card overlay">
-  <img id="live" alt="live camera">
-  <pre id="verdict"></pre>
-  <button class="plain" id="liveBtn" onclick="toggleLive()">Pause live</button>
-</div>
+      <div class="card">
+        <div class="live-wrap">
+          <img id="live" alt="live camera">
+          <span class="live-chip" id="liveChip">● LIVE</span>
+          <button class="sm live-btn" id="liveBtn" onclick="toggleLive()">Pause</button>
+          <div class="live-verdict" id="verdict"><div class="who">Waiting…</div></div>
+        </div>
+      </div>
 
-<div class="card">
-  <div class="k">Feeder</div>
-  <div class="grid" id="feeder"></div>
-  <div style="margin-top:8px">
-    <button onclick="feeder('open')">Open</button>
-    <button class="plain" onclick="feeder('close')">Close</button>
-    <button class="plain" onclick="feeder('rotate')">Rotate</button>
-    <button class="danger" onclick="feedNow()">Feed now</button>
+      <div class="card">
+        <h2>Feeder</h2>
+        <div class="lidrow">
+          <span class="pill" id="lidPill">lid —</span>
+          <span class="pill" id="plshow">plate —</span>
+          <span class="pill" id="feedsPill">0 feeds</span>
+        </div>
+        <div class="btnrow">
+          <button class="primary" onclick="feedNow()">Feed now</button>
+          <button onclick="feeder('open')">Open</button>
+          <button onclick="feeder('close')">Close</button>
+          <button onclick="feeder('rotate')">Rotate</button>
+        </div>
+        <div class="hint">Buttons ask the feeder controller to act on its next check (a second or two). Nothing moves in dry‑run mode.</div>
+      </div>
+
+      <div class="card">
+        <h2>Food loaded</h2>
+        <div class="chips" id="plates"></div>
+        <div class="btnrow"><button class="primary sm" onclick="savePlates()">Save loaded plates</button></div>
+        <div class="hint">Mark which bowls you filled. Saving resets the night's count and re‑arms the feeder.</div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <h2>Status</h2>
+        <div class="tiles" id="tiles"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="display:flex;justify-content:space-between;align-items:center">Activity
+          <span class="toggle"><input type="checkbox" id="allEvents" onchange="loadEvents()"> show all</span></h2>
+        <div class="evlist" id="events"></div>
+      </div>
+    </div>
   </div>
-  <small>Buttons send a request; the state machine runs it on its next tick and logs it. Honors DRY_RUN.</small>
-</div>
 
-<div class="card">
-  <div class="k">Plates loaded (tap to toggle, then Save — resets counters and returns to IDLE)</div>
-  <div class="plates" id="plates"></div>
-  <button onclick="savePlates()">Save plates</button>
-</div>
+  <div class="card" style="margin-top:16px">
+    <h2>Reference photos</h2>
+    <div class="refgrid" id="refs"></div>
+    <div class="btnrow"><button class="sm" onclick="reloadRefs()">Reload photos</button></div>
+    <div class="hint">What the detector learns each animal from. At night the camera is infra‑red, so a black coat is invisible — “Grab frame” captures real IR shots to teach it size and shape.</div>
+  </div>
 
-<div class="card">
-  <div class="k">Reference photos (what the model recognizes each animal by)</div>
-  <div class="grid" id="refcounts"></div>
-  <div id="refupload" style="margin-top:8px"></div>
-  <button class="plain" onclick="reloadRefs()">Reload reference photos</button>
-  <small>Upload clear photos of each animal. Use "Grab frame" at night to capture IR reference shots from this camera — the black coat is invisible in IR, so night ID relies on size/shape.</small>
+  <div class="card" style="margin-top:16px">
+    <details>
+      <summary>Settings</summary>
+      <div id="controls"></div>
+      <div class="btnrow"><button class="primary sm" onclick="saveConfig()">Save settings</button></div>
+    </details>
+  </div>
 </div>
-
-<div class="card">
-  <div class="k">Controls (saved to config.toml, applied on the next loop)</div>
-  <div id="controls"></div>
-  <button onclick="saveConfig()">Save settings</button>
-</div>
-
-<div class="card">
-  <div class="k">Events <label style="display:inline;border:0"><input type="checkbox" id="allEvents" onchange="loadEvents()"> include transitions</label></div>
-  <div id="events"></div>
-</div>
+<div class="toast" id="toast"></div>
 
 <script>
-const q = (p) => p;
+const ANIMALS = ["grrr","bowie","cat"];
+const NAMES = {grrr:"Grrr",bowie:"Bowie",cat:"the cat",none:"Nothing",unsure:"Unsure"};
+const STATES = {
+  OUTSIDE_WINDOW:["Off hours","Outside the active feeding window","muted"],
+  IDLE:["Watching","Waiting for something to move at the bowl","accent"],
+  WATCHING:["Checking","Figuring out who's at the bowl","accent"],
+  OPENING:["Opening","Opening the feeder","warn"],
+  FEEDING:["Feeding","Lid is open — Grrr is eating","ok"],
+  CLOSING:["Closing","Closing the feeder","warn"],
+  COOLDOWN:["Cooldown","Waiting before the next feed","muted"],
+  DONE:["Done","Finished for this window","muted"],
+};
+const EV = {
+  open:["🍽️","Fed"],close:["✅","Closed"],veto:["🚫","Blocked — wrong animal"],
+  feed_failed:["⚠️","Feed failed"],close_failed:["⚠️","Close failed"],
+  wanted_food_none_left:["🙁","Wanted food, none left"],startup:["▶️","Started up"],
+  bowie_during_feed:["🐕","Bowie showed up during feeding"],cat_during_feed:["🐈","Cat showed up during feeding"],
+  camera_offline:["📵","Camera offline"],camera_online:["📶","Camera back online"],
+  plates_set:["🥣","Plates updated"],grrr_blocked:["⏳","Grrr seen but not fed yet"],
+  manual_open:["🖐️","Opened by hand"],manual_close:["🖐️","Closed by hand"],manual_rotate:["🔄","Rotated by hand"],
+  manual_open_failed:["⚠️","Manual open failed"],manual_close_failed:["⚠️","Manual close failed"],
+  manual_rotate_failed:["⚠️","Manual rotate failed"],config:["⚙️","Settings changed"],
+};
+// key, friendly label, type, group. type: bool|number|text|select(options)
 const CONTROLS = [
-  ["ENABLED","bool"],["DRY_RUN","bool"],["ACTIVE_START","text"],["ACTIVE_END","text"],
-  ["MIN_GAP_MIN","number"],["LEAVE_TIMEOUT_S","number"],["FEEDING_MAX_MIN","number"],
-  ["FEEDING_POLL_S","number"],["CONFIRMATIONS_REQUIRED","number"],["GRRR_MIN_CONF","number"],
-  ["MOTION_PIXEL_FRACTION","number"],["MOTION_HOLD_S","number"],["LLM_MIN_INTERVAL_S","number"],
-  ["HEARTBEAT_MIN","number"],["LLM_MODEL","text"],["MOTION_SOURCE","text"]];
+  ["ENABLED","Enabled","bool","Schedule"],
+  ["ACTIVE_START","Active from","text","Schedule"],
+  ["ACTIVE_END","Active until","text","Schedule"],
+  ["DRY_RUN","Dry run (don't move feeder)","bool","Schedule"],
+  ["IDENTIFIER","Detector","select:claude,yolo","Identification"],
+  ["GRRR_MIN_CONF","Min confidence for Grrr","number","Identification"],
+  ["CONFIRMATIONS_REQUIRED","Confirmations before feeding","number","Identification"],
+  ["GRRR_MAX_BOX_FRACTION","YOLO: max size that's Grrr","number","Identification"],
+  ["YOLO_MIN_CONF","YOLO: min detection confidence","number","Identification"],
+  ["LLM_MODEL","Claude model","text","Identification"],
+  ["MIN_GAP_MIN","Min minutes between feeds","number","Feeding"],
+  ["LEAVE_TIMEOUT_S","Close after gone (sec)","number","Feeding"],
+  ["FEEDING_MAX_MIN","Max feeding length (min)","number","Feeding"],
+  ["FEEDING_POLL_S","Check interval while feeding (sec)","number","Feeding"],
+  ["MOTION_SOURCE","Motion source","select:camera,frames","Motion & sensing"],
+  ["MOTION_HOLD_S","Keep watching after motion (sec)","number","Motion & sensing"],
+  ["MOTION_PIXEL_FRACTION","Frame-diff sensitivity","number","Motion & sensing"],
+  ["LLM_MIN_INTERVAL_S","Min seconds between checks","number","Motion & sensing"],
+  ["LID_POLL_S","Lid check interval (sec)","number","Advanced"],
+  ["FEED_RETRY_BACKOFF_S","Backoff after a failed feed (sec)","number","Advanced"],
+  ["HEARTBEAT_MIN","Heartbeat interval (min)","number","Advanced"],
+  ["DASH_AUTH","Dashboard auth","select:tailscale,basic,none","Advanced"],
+];
 let plates = {};
-const fmt = (s) => s == null ? "—" : (s < 90 ? s + "s" : Math.round(s/60) + "m");
+let live = true;
+const fmtAge = (s) => s == null ? "—" : (s < 90 ? s + "s ago" : Math.round(s/60) + "m ago");
+const fmtIn = (s) => !s ? "now" : (s < 90 ? "in " + s + "s" : "in " + Math.round(s/60) + "m");
+
+let toastT;
+function toast(msg, err) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "toast show" + (err ? " err" : "");
+  clearTimeout(toastT); toastT = setTimeout(() => t.className = "toast", 2600);
+}
 
 async function refresh() {
-  const s = await (await fetch(q("/api/status"))).json();
-  const st = document.getElementById("state");
-  st.textContent = s.state;
-  st.className = "state " + (s.state === "FEEDING" ? "ok" : (s.camera_offline ? "bad" : ""));
-  document.getElementById("mode").textContent = (s.dry_run ? "DRY RUN" : "LIVE") + (s.enabled ? "" : " · DISABLED");
-  const rows = [
-    ["Window", s.active_window + (s.in_window ? " (active)" : " (outside)")],
-    ["Plates", Object.entries(s.plates).map(([p,v]) => p + ":" + v).join(" ")],
-    ["Feeds this window", s.feeds_this_window],
-    ["Next feed allowed", s.next_allowed_feed_in_s ? "in " + fmt(s.next_allowed_feed_in_s) : "now"],
-    ["Heartbeat age", fmt(s.heartbeat_age_s)],
-    ["Camera frame age", s.camera_age_s == null ? "no frames" : fmt(s.camera_age_s)],
-    ["Motion", s.motion_fraction],
-    ["Camera motion", s.motion_source !== "camera" ? "(frame-diff)" : (s.camera_events_ok === false ? "⚠ events down → frame-diff" : ((s.camera_motion ? "motion " : "") + (s.camera_animal ? "🐾 animal" : (s.camera_motion ? "" : "quiet"))))],
-    ["LLM today", s.llm_calls_today + " calls · $" + s.llm_cost_today_usd.toFixed(3)],
-    ["Model", s.llm_model],
-    ["Reference photos", Object.entries(s.reference_counts).map(([a,n]) => a + ":" + n).join(" ")],
-    ["Feeding since", s.feeding_since || "—"],
-  ];
-  document.getElementById("status").innerHTML = rows.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
-  document.getElementById("verdict").textContent = s.last_verdict
-    ? (s.last_llm_at || "") + "\\n" + JSON.stringify(s.last_verdict) : "no LLM verdict yet";
+  let s;
+  try { s = await (await fetch("/api/status")).json(); }
+  catch (e) { document.getElementById("camBadge").textContent = "disconnected"; return; }
+
+  const [lbl, sub, tone] = STATES[s.state] || [s.state, "", "muted"];
+  document.getElementById("stateBig").textContent = lbl;
+  document.getElementById("stateSub").textContent = sub;
+  document.getElementById("stateDot").className = "dot " + tone;
+
+  const mb = document.getElementById("modeBadge");
+  mb.textContent = s.dry_run ? "Dry run" : "Live";
+  mb.className = "badge " + (s.dry_run ? "dry" : "live");
+  const cb = document.getElementById("camBadge");
+  cb.textContent = s.camera_offline ? "Camera offline" : "Camera ok";
+  cb.className = "badge " + (s.camera_offline ? "off" : "live");
+
+  // live verdict, humanized
+  const v = s.last_verdict, vd = document.getElementById("verdict");
+  if (!v) { vd.innerHTML = '<div class="who">Nothing yet</div><div class="why">No animal checked since the last feed</div>'; }
+  else {
+    let who;
+    if (v.animal === "none") who = "No animal at the bowl";
+    else if (v.animal === "unsure") who = "Not sure who that is";
+    else who = `${NAMES[v.animal]||v.animal} · ${Math.round((v.confidence||0)*100)}% · ${v.at_bowl?"at the bowl":"nearby"}`;
+    const extra = (v.other_animals_present||[]).length ? " · also "+v.other_animals_present.map(a=>NAMES[a]||a).join(", ") : "";
+    vd.innerHTML = `<div class="who">${who}${extra}</div>` + (v.reason ? `<div class="why">${esc(v.reason)}</div>` : "");
+  }
+
+  // feeder pills
+  const lp = document.getElementById("lidPill");
+  lp.textContent = s.lid_open ? "lid open" : "lid closed";
+  lp.className = "pill " + (s.lid_open ? "open" : "closed");
+  document.getElementById("plshow").textContent = s.current_plate ? ("plate " + s.current_plate) : "plate —";
+  document.getElementById("feedsPill").textContent = s.feeds_this_window + " feed" + (s.feeds_this_window==1?"":"s") + " tonight";
+
+  // status tiles
+  let motion;
+  if (s.motion_source !== "camera") motion = "frame diff";
+  else if (s.camera_events_ok === false) motion = "events down";
+  else if (s.camera_animal) motion = "🐾 animal";
+  else if (s.camera_motion) motion = "motion";
+  else motion = "quiet";
+  const tiles = [
+    ["Window", s.active_window + (s.in_window ? " · active" : " · off")],
+    ["Next feed", s.next_allowed_feed_in_s ? fmtIn(s.next_allowed_feed_in_s) : "now"],
+    ["Loaded plates", (s.loaded_plates&&s.loaded_plates.length) ? s.loaded_plates.join(", ") : "none"],
+    ["Camera", s.camera_age_s==null ? "no frames" : fmtAge(s.camera_age_s)],
+    ["Motion", motion],
+    ["Checks today", s.llm_calls_today + (s.llm_cost_today_usd ? " · $"+s.llm_cost_today_usd.toFixed(2) : "")],
+    ["Heartbeat", fmtAge(s.heartbeat_age_s)],
+  ].filter(t => t[1] !== "");
+  document.getElementById("tiles").innerHTML = tiles.map(([l,val]) =>
+    `<div class="tile"><div class="l">${l}</div><div class="val">${val}</div></div>`).join("");
+
   if (!live) document.getElementById("live").src = "/frame.jpg?t=" + Date.now();
   if (!Object.keys(plates).length) { plates = s.plates; renderPlates(); }
-  const lid = s.lid_open ? '<span class="ok">● OPEN</span>' : '<span class="muted">○ closed</span>';
-  const frows = [
-    ["Lid", lid],
-    ["Current plate", s.current_plate ? ("plate " + s.current_plate) : "unknown"],
-    ["Mode", s.dry_run ? '<span class="warn">DRY RUN (logs only)</span>' : '<span class="ok">LIVE</span>'],
-    ["State", s.state],
-    ["Loaded plates", (s.loaded_plates && s.loaded_plates.length) ? s.loaded_plates.join(", ") : "none"],
-    ["Feeds this window", s.feeds_this_window],
-    ["Last open", s.last_open_at ? s.last_open_at.replace("T"," ") : "never"],
-    ["Next feed allowed", s.next_allowed_feed_in_s ? "in " + fmt(s.next_allowed_feed_in_s) : "now"],
-  ];
-  document.getElementById("feeder").innerHTML = frows.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
   renderRefs(s.reference_counts || {});
 }
-const ANIMALS = ["grrr","bowie","cat"];
-function renderRefs(counts) {
-  document.getElementById("refcounts").innerHTML = ANIMALS.map(a => `<div class="k">${a}</div><div class="v">${counts[a]||0} photos</div>`).join("");
-  if (document.getElementById("refupload").dataset.built) return;
-  document.getElementById("refupload").dataset.built = "1";
-  document.getElementById("refupload").innerHTML = ANIMALS.map(a =>
-    `<div style="padding:4px 0"><b>${a}</b>: <input type="file" accept="image/*" multiple id="f_${a}" onchange="uploadRefs('${a}')"> <button class="plain" onclick="grabRef('${a}')">Grab frame</button></div>`).join("");
-}
-async function uploadRefs(a) {
-  const el = document.getElementById("f_"+a);
-  for (const file of el.files) {
-    const buf = await file.arrayBuffer();
-    await fetch(q("/api/reference/"+a+"?filename="+encodeURIComponent(file.name)), {method:"POST", headers:{"Content-Type":"application/octet-stream"}, body: buf});
-  }
-  el.value = ""; alert("uploaded to " + a); refresh();
-}
-async function grabRef(a) {
-  const r = await fetch(q("/api/reference/"+a+"/capture"), {method:"POST"});
-  if (!r.ok) { alert("grab failed: " + (await r.text())); return; }
-  const j = await r.json(); alert("saved " + j.saved + " to " + a); refresh();
-}
-async function feeder(action) {
-  if (!confirm(action.toUpperCase() + " the feeder now? (runs on the next tick; honors DRY_RUN)")) return;
-  await fetch(q("/api/feeder/"+action), {method:"POST"});
-  // Poll a few times so the panel reflects the result as soon as the machine runs it.
-  for (let i=0;i<6;i++){ setTimeout(refresh, i*700); }
-}
+
+function esc(t){return (t||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+
 function renderPlates() {
   document.getElementById("plates").innerHTML = [1,2,3].map(p =>
-    `<button class="${plates[p] === "loaded" ? "on" : "plain"}" onclick="togglePlate(${p})">Plate ${p}: ${plates[p]}</button>`).join("");
+    `<div class="chip ${plates[p]==="loaded"?"on":""}" onclick="togglePlate(${p})">Bowl ${p}<span class="pn">${plates[p]==="loaded"?"full":"empty"}</span></div>`).join("");
 }
-function togglePlate(p) { plates[p] = plates[p] === "loaded" ? "empty" : "loaded"; renderPlates(); }
-async function savePlates() {
-  const loaded = [1,2,3].filter(p => plates[p] === "loaded");
-  await fetch(q("/api/plates"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({loaded})});
-  plates = {}; refresh();
+function togglePlate(p){ plates[p] = plates[p]==="loaded" ? "empty" : "loaded"; renderPlates(); }
+async function savePlates(){
+  const loaded = [1,2,3].filter(p => plates[p]==="loaded");
+  await fetch("/api/plates",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({loaded})});
+  plates = {}; toast("Loaded plates saved"); refresh();
 }
-async function feedNow() {
-  if (!confirm("Open the feeder now? This ignores MIN_GAP and identification.")) return;
-  const r = await (await fetch(q("/api/feed-now"), {method:"POST"})).json(); alert(r.ok);
+
+function renderRefs(counts){
+  document.getElementById("refs").innerHTML = ANIMALS.map(a =>
+    `<div class="ref"><div class="name">${NAMES[a]||a}</div><div class="cnt">${counts[a]||0} photo${(counts[a]||0)==1?"":"s"}</div>`+
+    `<input type="file" accept="image/*" multiple id="f_${a}" onchange="uploadRefs('${a}')">`+
+    `<div class="btnrow"><button class="sm" onclick="grabRef('${a}')">Grab frame</button></div></div>`).join("");
 }
-async function reloadRefs() {
-  const r = await (await fetch(q("/api/reload-references"), {method:"POST"})).json();
-  alert("reference photos: " + JSON.stringify(r.reference_counts));
+async function uploadRefs(a){
+  const el = document.getElementById("f_"+a); const n = el.files.length;
+  for (const file of el.files){
+    const buf = await file.arrayBuffer();
+    await fetch("/api/reference/"+a+"?filename="+encodeURIComponent(file.name),
+      {method:"POST",headers:{"Content-Type":"application/octet-stream"},body:buf});
+  }
+  el.value=""; toast(`Added ${n} photo${n==1?"":"s"} to ${NAMES[a]||a}`); refresh();
 }
-async function loadConfig() {
-  const c = await (await fetch(q("/api/config"))).json();
-  document.getElementById("controls").innerHTML = CONTROLS.map(([k,t]) => t === "bool"
-    ? `<label>${k}<input type="checkbox" id="c_${k}" ${c[k] ? "checked" : ""}></label>`
-    : `<label>${k}<input type="${t}" step="any" id="c_${k}" value="${c[k]}"></label>`).join("");
+async function grabRef(a){
+  const r = await fetch("/api/reference/"+a+"/capture",{method:"POST"});
+  if (!r.ok){ toast("No camera frame to grab", true); return; }
+  toast("Saved a frame to " + (NAMES[a]||a)); refresh();
 }
-async function saveConfig() {
+async function reloadRefs(){ await fetch("/api/reload-references",{method:"POST"}); toast("Reloaded reference photos"); refresh(); }
+
+async function feeder(action){
+  if (!confirm(action[0].toUpperCase()+action.slice(1)+" the feeder now?")) return;
+  await fetch("/api/feeder/"+action,{method:"POST"});
+  toast(action[0].toUpperCase()+action.slice(1)+" requested");
+  for (let i=1;i<=6;i++) setTimeout(refresh, i*700);
+}
+async function feedNow(){
+  if (!confirm("Feed now? This opens the feeder, skipping identification.")) return;
+  await fetch("/api/feed-now",{method:"POST"});
+  toast("Feed requested");
+  for (let i=1;i<=6;i++) setTimeout(refresh, i*700);
+}
+
+async function loadConfig(){
+  const c = await (await fetch("/api/config")).json();
+  let html = ""; let group = "";
+  for (const [k,label,type,grp] of CONTROLS){
+    if (c[k] === undefined) continue;
+    if (grp !== group){ group = grp; html += `<div class="setgrp">${grp}</div>`; }
+    let input;
+    if (type === "bool") input = `<input type="checkbox" id="c_${k}" ${c[k]?"checked":""}>`;
+    else if (type.startsWith("select:")) {
+      const opts = type.slice(7).split(",").map(o => `<option ${c[k]==o?"selected":""}>${o}</option>`).join("");
+      input = `<select id="c_${k}">${opts}</select>`;
+    } else input = `<input type="${type}" step="any" id="c_${k}" value="${c[k]}">`;
+    html += `<div class="field"><label for="c_${k}">${label}</label>${input}</div>`;
+  }
+  document.getElementById("controls").innerHTML = html;
+}
+async function saveConfig(){
   const body = {};
-  for (const [k,t] of CONTROLS) { const el = document.getElementById("c_"+k); body[k] = t === "bool" ? el.checked : el.value; }
-  const r = await fetch(q("/api/config"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-  if (!r.ok) alert("rejected: " + (await r.text())); else loadConfig();
+  for (const [k,label,type] of CONTROLS){
+    const el = document.getElementById("c_"+k); if (!el) continue;
+    body[k] = type === "bool" ? el.checked : el.value;
+  }
+  const r = await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if (!r.ok){ toast("Rejected: " + (await r.text()), true); } else { toast("Settings saved"); loadConfig(); }
 }
-async function loadEvents() {
+
+async function loadEvents(){
   const all = document.getElementById("allEvents").checked;
-  const evs = await (await fetch(q("/api/events?all=" + all))).json();
-  document.getElementById("events").innerHTML = evs.map(e =>
-    `<div class="ev"><span class="when">${e.at.replace("T"," ")}</span> <a href="${q("/events/"+e.id)}"><span class="kind">${e.kind}</span></a> ${e.reason}` +
-    (e.frames.length ? ` <a href="${q("/events/"+e.id)}">[${e.frames.length} frames]</a>` : "") + `</div>`).join("") || "<small>no events yet</small>";
+  const evs = await (await fetch("/api/events?all=" + all)).json();
+  if (!evs.length){ document.getElementById("events").innerHTML = '<div class="hint">No activity yet.</div>'; return; }
+  document.getElementById("events").innerHTML = evs.map(e => {
+    const [ico,label] = EV[e.kind] || ["•", e.kind];
+    const when = e.at.replace("T"," ").slice(5,16);
+    const frames = e.frames.length ? ` · <a href="/events/${e.id}">${e.frames.length} frame${e.frames.length==1?"":"s"}</a>` : "";
+    return `<div class="ev"><div class="ico">${ico}</div><div class="body">`+
+      `<div class="title"><a href="/events/${e.id}">${label}</a></div>`+
+      `<div class="meta">${when}${e.reason?" · "+esc(e.reason):""}${frames}</div></div></div>`;
+  }).join("");
 }
-// Live view: an MJPEG stream while playing, a still refreshed with the status while paused.
-// Phones drop the stream when the tab is backgrounded, and the server ends it every 10
-// minutes, so reconnect on error and whenever the page becomes visible again.
-let live = true;
-function startLive() { document.getElementById("live").src = "/stream.mjpg?t=" + Date.now(); }
-function toggleLive() {
+
+// Live view: MJPEG while playing; a still refreshed with status while paused. Phones drop the
+// stream when backgrounded and the server ends it periodically, so reconnect on error/visibility.
+function startLive(){ document.getElementById("live").src = "/stream.mjpg?t=" + Date.now(); }
+function toggleLive(){
   live = !live;
-  document.getElementById("liveBtn").textContent = live ? "Pause live" : "Resume live";
+  document.getElementById("liveBtn").textContent = live ? "Pause" : "Resume";
+  document.getElementById("liveChip").style.display = live ? "" : "none";
   if (live) startLive(); else refresh();
 }
 document.getElementById("live").onerror = () => { if (live) setTimeout(startLive, 3000); };
 document.addEventListener("visibilitychange", () => { if (live && !document.hidden) startLive(); });
-startLive();
-refresh(); loadConfig(); loadEvents();
+startLive(); refresh(); loadConfig(); loadEvents();
 setInterval(refresh, 1500); setInterval(loadEvents, 15000);
 </script></body></html>
 """
 
 EVENT_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>event {id}</title>
-<style>body{{background:#111;color:#eee;font:16px system-ui,sans-serif;padding:12px}}
-img{{width:100%;border-radius:8px;margin:6px 0}}pre{{background:#1c1c1c;padding:10px;border-radius:8px;white-space:pre-wrap}}
-a{{color:#6aa9ff}}</style></head><body>
-<a href="/">&larr; dashboard</a>
-<h2>{kind} <small>#{id} · {at}</small></h2>
-<p>{reason}</p>
-<pre>{data}</pre>
+<style>
+ :root{{--bg:#0e0f13;--surface:#171920;--border:#2a2e3a;--fg:#e7e9ef;--muted:#949aa7;--accent:#6aa9ff}}
+ *{{box-sizing:border-box}}
+ body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}}
+ .wrap{{max-width:760px;margin:0 auto;padding:16px}}
+ a{{color:var(--accent);text-decoration:none}}
+ h2{{margin:10px 0 2px;font-size:20px}}
+ .meta{{color:var(--muted);font-size:13px;margin-bottom:14px}}
+ .reason{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;margin:12px 0}}
+ img{{width:100%;border-radius:12px;margin:8px 0;border:1px solid var(--border)}}
+ details{{margin-top:12px}} summary{{color:var(--muted);cursor:pointer;font-size:13px}}
+ pre{{background:var(--surface);border:1px solid var(--border);padding:12px;border-radius:12px;
+   white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--muted)}}
+</style></head><body><div class="wrap">
+<a href="/">&larr; Back to dashboard</a>
+<h2>{kind}</h2>
+<div class="meta">event #{id} · {at}</div>
+<div class="reason">{reason}</div>
 {images}
-</body></html>"""
+<details><summary>Raw data</summary><pre>{data}</pre></details>
+</div></body></html>"""
