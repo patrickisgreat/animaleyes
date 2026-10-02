@@ -51,7 +51,8 @@ different lever (prompt, thresholds on the dashboard, reference photos) or escal
 - **Web**: FastAPI + uvicorn, one inline HTML page, no build step
 - **Storage**: SQLite (stdlib `sqlite3`), `config.toml` via `tomllib`/`tomli-w`
 - **Feeder**: `petlibro-cli` (vendored) as a subprocess
-- **Runtime**: Docker Compose on a home Linux box, reached over Tailscale
+- **Runtime**: Docker Compose (host network) on the robot-computer box, dashboard on
+  127.0.0.1:8081 behind basic auth, reached via Cloudflare Tunnel or Tailscale Serve
 - **Testing**: pytest with fakes for clock, LLM, feeder, notifier
 - **CI**: GitHub Actions via `patrickisgreat/actions-toolkit` `python-ci`
 
@@ -66,6 +67,7 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]" -e ./petlibro-cli
 .venv/bin/python tools/replay.py data/captures   # prove identification
 docker compose up -d --build                # on the box
 tools/watchdog.sh                           # from another machine
+tools/expose.sh <hostname>                  # once: Cloudflare hostname + Tailscale Serve
 ```
 
 ## Project Structure
@@ -82,7 +84,7 @@ animaleyes/
 ├── feeder.py       # petlibro-cli wrapper (PetlibroCli) and DryRunFeeder
 ├── notify.py       # Slack webhook
 └── dashboard.py    # FastAPI routes + the inline page
-tools/              # capture.py, replay.py, watchdog.sh
+tools/              # capture.py, replay.py, watchdog.sh, expose.sh
 tests/              # conftest.py has the fakes and the Harness
 petlibro-cli/       # vendored, do not edit here
 data/reference/     # {grrr,bowie,cat}/ photos, committed (small set)

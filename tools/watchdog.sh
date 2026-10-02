@@ -2,11 +2,14 @@
 # Run this from ANOTHER machine (cron every 5 min). Alerts Slack when the dashboard heartbeat
 # is stale or the dashboard is unreachable, so a dead box does not go unnoticed.
 #
-#   DASH_URL=http://box.tailnet.ts.net:8080 DASH_TOKEN=... SLACK_WEBHOOK=... tools/watchdog.sh
+#   DASH_URL=https://robot-computer.<tailnet>.ts.net:8443 DASH_USER=... DASH_PASSWORD=... \
+#     SLACK_WEBHOOK=... tools/watchdog.sh
 set -euo pipefail
 
 : "${DASH_URL:?set DASH_URL}"
-: "${DASH_TOKEN:?set DASH_TOKEN}"
+for var in DASH_USER DASH_PASSWORD; do
+  [ -n "${!var:-}" ] || { echo "set $var" >&2; exit 1; }
+done
 : "${SLACK_WEBHOOK:?set SLACK_WEBHOOK}"
 STALE_S="${STALE_S:-600}"
 
@@ -16,7 +19,7 @@ alert() {
   echo "alerted: $1"
 }
 
-if ! body="$(curl -fsS --max-time 15 "$DASH_URL/api/status?token=$DASH_TOKEN")"; then
+if ! body="$(curl -fsS --max-time 15 -u "$DASH_USER:$DASH_PASSWORD" "$DASH_URL/api/status")"; then
   alert "animaleyes dashboard unreachable at $DASH_URL"
   exit 1
 fi

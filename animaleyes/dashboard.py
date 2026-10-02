@@ -1,22 +1,49 @@
-"""Single-page dashboard. No build step; the page polls JSON and a JPEG every 3 seconds.
+"""Single-page dashboard. No build step; the page polls JSON every 3 seconds and shows the
+camera as an MJPEG stream.
 
-Every route requires ?token=DASH_TOKEN. Controls write config.toml or set flags the state
-machine consumes on its next tick; the dashboard never talks to the feeder itself.
+Every route except /healthz requires HTTP basic auth (DASH_USER / DASH_PASSWORD). It is
+served on loopback only and reached through Cloudflare Tunnel or Tailscale Serve, both of
+which terminate TLS, so the password never crosses a network in the clear. Controls write
+config.toml or set flags the state machine consumes on its next tick; the dashboard never
+talks to the feeder itself.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import secrets as secrets_lib
+import time
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.staticfiles import StaticFiles
 
+from .camera import FrameBuffer
 from .config import ConfigStore, Secrets
 from .machine import Machine
 from .store import Store
+
+# Module level so FastAPI can resolve the annotation (this file uses postponed annotations).
+Credentials = Annotated[
+    HTTPBasicCredentials | None, Depends(HTTPBasic(auto_error=False, realm="animaleyes"))
+]
+
+STREAM_POLL_S = 0.1
+# The page reconnects when a stream ends, so a tab left open on a phone cannot hold a
+# connection through the tunnel forever.
+STREAM_MAX_S = 600
 
 MAIN_EVENT_KINDS = (
     "open",
@@ -32,6 +59,12 @@ MAIN_EVENT_KINDS = (
     "camera_online",
     "plates_set",
     "grrr_blocked",
+    "manual_open",
+    "manual_close",
+    "manual_rotate",
+    "manual_open_failed",
+    "manual_close_failed",
+    "manual_rotate_failed",
 )
 
 
@@ -42,18 +75,100 @@ def create_app(
     secrets: Secrets,
     frames_dir: Path,
     reload_references=None,
+    reference_dir: Path | None = None,
+    training_dir: Path | None = None,
+    frontend_dist: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
+    ANIMALS = ("grrr", "bowie", "cat")
+    index_html = frontend_dist / "index.html" if frontend_dist else None
+    PHOTO_SETS = {"reference": reference_dir, "training": training_dir}
+    IMG_EXT = (".jpg", ".jpeg", ".png")
 
-    def auth(token: str = Query(default="")) -> None:
-        if not secrets.dash_token or token != secrets.dash_token:
-            raise HTTPException(status_code=401, detail="bad token")
+    def photo_dir(set_name: str, animal: str, create: bool = False) -> Path:
+        base = PHOTO_SETS.get(set_name)
+        if base is None or animal not in ANIMALS:
+            raise HTTPException(status_code=404, detail="unknown photo set or animal")
+        d = base / animal
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def list_photos(set_name: str, animal: str) -> list[str]:
+        d = PHOTO_SETS.get(set_name)
+        d = (d / animal) if d else None
+        if not d or not d.is_dir():
+            return []
+        files = [p for p in d.iterdir() if p.suffix.lower() in IMG_EXT]
+        return [p.name for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)]
+
+    def ref_counts() -> dict[str, int]:
+        # Count the photos actually on disk, independent of the active detector (YOLO doesn't
+        # track reference images, so reading them off the identifier wrongly showed 0).
+        counts: dict[str, int] = {}
+        for a in ANIMALS:
+            d = (reference_dir / a) if reference_dir else None
+            counts[a] = (
+                sum(1 for p in d.glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
+                if d and d.is_dir()
+                else 0
+            )
+        return counts
+
+    def _basic_ok(credentials: Credentials) -> bool:
+        return (
+            bool(secrets.dash_password)
+            and credentials is not None
+            and secrets_lib.compare_digest(
+                credentials.username.encode(), secrets.dash_user.encode()
+            )
+            and secrets_lib.compare_digest(
+                credentials.password.encode(), secrets.dash_password.encode()
+            )
+        )
+
+    def auth(request: Request, credentials: Credentials) -> None:
+        mode = machine.settings.DASH_AUTH
+        if mode == "none":
+            return
+        # Tailscale trust: `tailscale serve` injects an identity header for the connecting
+        # tailnet device, so being on the tailnet IS the authentication — no password. We only
+        # trust it when the request did NOT arrive via the public Cloudflare tunnel (which adds
+        # cf-ray), so the header can't be forged from the internet.
+        ts_user = request.headers.get("tailscale-user-login")
+        via_cloudflare = "cf-ray" in request.headers
+        if mode == "tailscale" and ts_user and not via_cloudflare:
+            return
+        # Basic-auth fallback (public/Cloudflare path, or mode="basic").
+        if _basic_ok(credentials):
+            return
+        raise HTTPException(
+            status_code=401,
+            detail="login required",
+            headers={"WWW-Authenticate": 'Basic realm="animaleyes"'},
+        )
 
     guarded = [Depends(auth)]
 
+    @app.get("/healthz")
+    def healthz() -> dict[str, Any]:
+        """Liveness for the container healthcheck (and autoheal). Fails if the state-machine
+        loop has stopped ticking, so a hung-but-running process gets restarted. Unauthenticated
+        and reveals nothing sensitive."""
+        hb = store.get("heartbeat_at")
+        if hb:
+            age = (machine.clock() - datetime.fromisoformat(hb)).total_seconds()
+            limit = max(180, 3 * machine.settings.HEARTBEAT_MIN * 60)
+            if age > limit:
+                raise HTTPException(status_code=503, detail=f"loop stale {int(age)}s")
+        return {"ok": True}
+
     @app.get("/", response_class=HTMLResponse, dependencies=guarded)
-    def index(token: str) -> str:
-        return PAGE.replace("__TOKEN__", token)
+    def index() -> str:
+        # Serve the built React app; fall back to a minimal page when it isn't built (tests).
+        if index_html and index_html.is_file():
+            return index_html.read_text()
+        return FALLBACK_PAGE
 
     @app.get("/api/status", dependencies=guarded)
     def status() -> dict[str, Any]:
@@ -74,6 +189,25 @@ def create_app(
             "plates": store.plates(),
             "loaded_plates": store.loaded_plates(),
             "feeds_this_window": store.get_int("feeds_this_window"),
+            "last_open_at": store.get("last_open_at"),
+            "motion_source": settings.MOTION_SOURCE,
+            "camera_motion": getattr(machine.events, "motion_state", None),
+            "camera_animal": getattr(machine.events, "animal_state", None),
+            "camera_events_ok": (machine.events.last_error is None)
+            if machine.events is not None
+            else None,
+            # Prefer the feeder's real lid state (catches opens done from the PetLibro app);
+            # fall back to what the machine knows from its own actions.
+            "lid_open": (store.get("lid_actual_open") == "1")
+            if store.get("lid_actual_open") is not None
+            else (
+                machine.state in ("OPENING", "FEEDING", "CLOSING")
+                or bool(store.get("lid_manual_open"))
+            ),
+            "current_plate": store.get_int("current_plate", 0) or None,
+            "feeding_plate": (store.get_int("feeding_plate", 0) or None)
+            if machine.state == "FEEDING"
+            else None,
             "next_allowed_feed": next_feed.isoformat(timespec="seconds") if next_feed else None,
             "next_allowed_feed_in_s": max(0, int((next_feed - now).total_seconds()))
             if next_feed
@@ -85,11 +219,13 @@ def create_app(
             "llm_calls_today": calls,
             "llm_cost_today_usd": round(cost, 4),
             "llm_model": settings.LLM_MODEL,
+            "identifier": settings.IDENTIFIER,
             "last_verdict": verdict,
             "last_llm_at": machine.last_llm_at.isoformat(timespec="seconds")
             if machine.last_llm_at
             else None,
-            "reference_counts": getattr(machine.llm, "reference_counts", {}),
+            "reference_counts": ref_counts(),
+            "training_counts": {a: len(list_photos("training", a)) for a in ANIMALS},
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
         }
 
@@ -122,11 +258,91 @@ def create_app(
         machine.request_feed_now()
         return {"ok": "feed requested; the state machine opens on its next tick"}
 
+    @app.post("/api/feeder/{action}", dependencies=guarded)
+    def feeder_action(action: str) -> dict[str, str]:
+        # The page only enqueues the request; the state machine is still the sole caller of
+        # the feeder and performs it on its next tick (product invariant).
+        try:
+            machine.request_manual_action(action)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": f"{action} requested; the state machine runs it on its next tick"}
+
+    def _animal_dir(animal: str) -> Path:
+        if animal not in ANIMALS or reference_dir is None:
+            raise HTTPException(status_code=400, detail="unknown animal")
+        d = reference_dir / animal
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _save_reference(animal: str, name: str, jpeg: bytes) -> dict[str, Any]:
+        safe = Path(name).name or "frame.jpg"
+        if not safe.lower().endswith((".jpg", ".jpeg", ".png")):
+            safe += ".jpg"
+        (_animal_dir(animal) / safe).write_bytes(jpeg)
+        if reload_references:
+            reload_references()
+        return {"saved": safe, "reference_counts": ref_counts()}
+
+    @app.post("/api/reference/{animal}", dependencies=guarded)
+    async def upload_reference(animal: str, request: Request) -> dict[str, Any]:
+        # Raw image bytes in the body (no multipart dependency); filename in the query.
+        name = request.query_params.get("filename", "upload.jpg")
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="empty upload")
+        return _save_reference(animal, name, body)
+
+    @app.post("/api/reference/{animal}/capture", dependencies=guarded)
+    def capture_reference(animal: str) -> dict[str, Any]:
+        frames = machine.frames.latest(1)
+        if not frames:
+            raise HTTPException(status_code=404, detail="no camera frame yet")
+        name = f"cam-{datetime.now().strftime('%Y%m%d-%H%M%S')}.jpg"
+        return _save_reference(animal, name, frames[0].jpeg)
+
     @app.post("/api/reload-references", dependencies=guarded)
     def reload_refs() -> dict[str, Any]:
         if reload_references:
             reload_references()
-        return {"reference_counts": getattr(machine.llm, "reference_counts", {})}
+        return {"reference_counts": ref_counts()}
+
+    # --- photo management (reference + auto-collected training frames) ---------------
+    @app.get("/api/photos/{set_name}/{animal}", dependencies=guarded)
+    def photos_list(set_name: str, animal: str, limit: int = 60) -> dict[str, Any]:
+        photo_dir(set_name, animal)  # validates set + animal (404 otherwise)
+        names = list_photos(set_name, animal)
+        return {"total": len(names), "files": names[:limit]}
+
+    @app.get("/photos/{set_name}/{animal}/{name}", dependencies=guarded)
+    def photo_file(set_name: str, animal: str, name: str) -> FileResponse:
+        d = photo_dir(set_name, animal)
+        path = (d / Path(name).name).resolve()
+        if not path.is_file() or d.resolve() not in path.parents:
+            raise HTTPException(status_code=404)
+        return FileResponse(path)
+
+    @app.delete("/api/photos/{set_name}/{animal}/{name}", dependencies=guarded)
+    def photo_delete(set_name: str, animal: str, name: str) -> dict[str, bool]:
+        d = photo_dir(set_name, animal)
+        path = (d / Path(name).name).resolve()
+        if path.is_file() and d.resolve() in path.parents:
+            path.unlink()
+        if set_name == "reference" and reload_references:
+            reload_references()
+        return {"ok": True}
+
+    @app.post("/api/photos/{set_name}/{animal}/{name}/retag", dependencies=guarded)
+    def photo_retag(set_name: str, animal: str, name: str, to: str) -> dict[str, bool]:
+        src_dir = photo_dir(set_name, animal)
+        src = (src_dir / Path(name).name).resolve()
+        if not src.is_file() or src_dir.resolve() not in src.parents:
+            raise HTTPException(status_code=404)
+        dst = photo_dir(set_name, to, create=True) / src.name
+        src.rename(dst)
+        if set_name == "reference" and reload_references:
+            reload_references()
+        return {"ok": True}
 
     @app.get("/frame.jpg", dependencies=guarded)
     def frame() -> Response:
@@ -137,19 +353,28 @@ def create_app(
             content=frames[0].jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"}
         )
 
+    @app.get("/stream.mjpg", dependencies=guarded)
+    def stream() -> StreamingResponse:
+        # Read-only view of the frames the camera thread already decodes; it opens no new
+        # connection to the camera. POC: runs at the ingest rate (~2 fps), which motion
+        # detection is tuned for.
+        return StreamingResponse(
+            mjpeg(machine.frames),
+            media_type=f"multipart/x-mixed-replace; boundary={MJPEG_BOUNDARY}",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/api/events", dependencies=guarded)
     def events(all: bool = False, limit: int = 100) -> JSONResponse:
         rows = store.events(limit=limit, kinds=None if all else MAIN_EVENT_KINDS)
         return JSONResponse([_event_json(e) for e in rows])
 
     @app.get("/events/{event_id}", response_class=HTMLResponse, dependencies=guarded)
-    def event_page(event_id: int, token: str) -> str:
+    def event_page(event_id: int) -> str:
         event = store.event(event_id)
         if not event:
             raise HTTPException(status_code=404)
-        images = "".join(
-            f'<img src="/frames/{name}?token={token}" alt="{name}">' for name in event.frames
-        )
+        images = "".join(f'<img src="/frames/{name}" alt="{name}">' for name in event.frames)
         return EVENT_PAGE.format(
             id=event.id,
             at=event.at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -157,7 +382,6 @@ def create_app(
             reason=_escape(event.reason),
             data=_escape(json.dumps(event.data, indent=2)),
             images=images,
-            token=token,
         )
 
     @app.get("/frames/{name}", dependencies=guarded)
@@ -167,7 +391,34 @@ def create_app(
             raise HTTPException(status_code=404)
         return FileResponse(path, media_type="image/jpeg")
 
+    # Static assets for the built React app (bundles, no secrets → unauthenticated).
+    if frontend_dist and (frontend_dist / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
+
     return app
+
+
+MJPEG_BOUNDARY = "frame"
+
+
+async def mjpeg(
+    frames: FrameBuffer, poll_s: float = STREAM_POLL_S, max_s: float = STREAM_MAX_S
+) -> AsyncIterator[bytes]:
+    """Yield each new frame in the buffer as one multipart/x-mixed-replace part."""
+    deadline = time.monotonic() + max_s
+    last_at: datetime | None = None
+    while time.monotonic() < deadline:
+        latest = frames.latest(1)
+        if latest and latest[0].at != last_at:
+            last_at = latest[0].at
+            jpeg = latest[0].jpeg
+            yield (
+                f"--{MJPEG_BOUNDARY}\r\nContent-Type: image/jpeg\r\n"
+                f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+                + jpeg
+                + b"\r\n"
+            )
+        await asyncio.sleep(poll_s)
 
 
 def _age(iso: str | None, now: datetime) -> int | None:
@@ -195,155 +446,34 @@ def seconds_to_text(seconds: int) -> str:
     return str(timedelta(seconds=seconds))
 
 
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>animaleyes</title>
-<style>
- :root{--bg:#111;--fg:#eee;--muted:#999;--card:#1c1c1c;--ok:#4caf50;--warn:#ff9800;--bad:#f44336;--accent:#6aa9ff}
- body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif;padding:12px}
- h1{font-size:20px;margin:0 0 12px}
- .card{background:var(--card);border-radius:10px;padding:12px;margin-bottom:12px}
- .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px}
- .k{color:var(--muted);font-size:13px}
- .v{font-weight:600;word-break:break-word}
- .state{font-size:28px;font-weight:800}
- .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
- img#live{width:100%;border-radius:8px;background:#000;min-height:120px}
- .overlay{position:relative}
- .overlay pre{position:absolute;left:8px;bottom:8px;margin:0;background:rgba(0,0,0,.65);color:#fff;
-   padding:6px 8px;border-radius:6px;font-size:12px;max-width:90%;white-space:pre-wrap}
- label{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #2a2a2a}
- input[type=text],input[type=number]{width:110px;background:#222;color:#fff;border:1px solid #444;border-radius:6px;padding:6px;font-size:16px}
- button{background:var(--accent);color:#000;border:0;border-radius:8px;padding:10px 14px;font-weight:700;font-size:15px;margin:6px 6px 0 0}
- button.danger{background:var(--bad);color:#fff}
- button.plain{background:#333;color:#fff}
- .ev{border-bottom:1px solid #2a2a2a;padding:8px 0}
- .ev a{color:var(--accent);text-decoration:none}
- .ev .kind{font-weight:700}
- .ev .when{color:var(--muted);font-size:12px}
- .plates button{margin-right:6px}
- .plates .on{background:var(--ok)}
- small{color:var(--muted)}
-</style></head><body>
-<h1>animaleyes <small id="mode"></small></h1>
-
-<div class="card">
-  <div class="state" id="state">…</div>
-  <div class="grid" id="status"></div>
-</div>
-
-<div class="card overlay">
-  <img id="live" alt="latest frame">
-  <pre id="verdict"></pre>
-</div>
-
-<div class="card">
-  <div class="k">Plates loaded (tap to toggle, then Save — resets counters and returns to IDLE)</div>
-  <div class="plates" id="plates"></div>
-  <button onclick="savePlates()">Save plates</button>
-  <button class="plain" onclick="reloadRefs()">Reload reference photos</button>
-  <button class="danger" onclick="feedNow()">Feed now</button>
-</div>
-
-<div class="card">
-  <div class="k">Controls (saved to config.toml, applied on the next loop)</div>
-  <div id="controls"></div>
-  <button onclick="saveConfig()">Save settings</button>
-</div>
-
-<div class="card">
-  <div class="k">Events <label style="display:inline;border:0"><input type="checkbox" id="allEvents" onchange="loadEvents()"> include transitions</label></div>
-  <div id="events"></div>
-</div>
-
-<script>
-const T = "__TOKEN__";
-const q = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(T);
-const CONTROLS = [
-  ["ENABLED","bool"],["DRY_RUN","bool"],["ACTIVE_START","text"],["ACTIVE_END","text"],
-  ["MIN_GAP_MIN","number"],["LEAVE_TIMEOUT_S","number"],["FEEDING_MAX_MIN","number"],
-  ["FEEDING_POLL_S","number"],["CONFIRMATIONS_REQUIRED","number"],["GRRR_MIN_CONF","number"],
-  ["MOTION_PIXEL_FRACTION","number"],["MOTION_HOLD_S","number"],["LLM_MIN_INTERVAL_S","number"],
-  ["HEARTBEAT_MIN","number"],["LLM_MODEL","text"]];
-let plates = {};
-const fmt = (s) => s == null ? "—" : (s < 90 ? s + "s" : Math.round(s/60) + "m");
-
-async function refresh() {
-  const s = await (await fetch(q("/api/status"))).json();
-  const st = document.getElementById("state");
-  st.textContent = s.state;
-  st.className = "state " + (s.state === "FEEDING" ? "ok" : (s.camera_offline ? "bad" : ""));
-  document.getElementById("mode").textContent = (s.dry_run ? "DRY RUN" : "LIVE") + (s.enabled ? "" : " · DISABLED");
-  const rows = [
-    ["Window", s.active_window + (s.in_window ? " (active)" : " (outside)")],
-    ["Plates", Object.entries(s.plates).map(([p,v]) => p + ":" + v).join(" ")],
-    ["Feeds this window", s.feeds_this_window],
-    ["Next feed allowed", s.next_allowed_feed_in_s ? "in " + fmt(s.next_allowed_feed_in_s) : "now"],
-    ["Heartbeat age", fmt(s.heartbeat_age_s)],
-    ["Camera frame age", s.camera_age_s == null ? "no frames" : fmt(s.camera_age_s)],
-    ["Motion", s.motion_fraction],
-    ["LLM today", s.llm_calls_today + " calls · $" + s.llm_cost_today_usd.toFixed(3)],
-    ["Model", s.llm_model],
-    ["Reference photos", Object.entries(s.reference_counts).map(([a,n]) => a + ":" + n).join(" ")],
-    ["Feeding since", s.feeding_since || "—"],
-  ];
-  document.getElementById("status").innerHTML = rows.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
-  document.getElementById("verdict").textContent = s.last_verdict
-    ? (s.last_llm_at || "") + "\\n" + JSON.stringify(s.last_verdict) : "no LLM verdict yet";
-  document.getElementById("live").src = q("/frame.jpg") + "&t=" + Date.now();
-  if (!Object.keys(plates).length) { plates = s.plates; renderPlates(); }
-}
-function renderPlates() {
-  document.getElementById("plates").innerHTML = [1,2,3].map(p =>
-    `<button class="${plates[p] === "loaded" ? "on" : "plain"}" onclick="togglePlate(${p})">Plate ${p}: ${plates[p]}</button>`).join("");
-}
-function togglePlate(p) { plates[p] = plates[p] === "loaded" ? "empty" : "loaded"; renderPlates(); }
-async function savePlates() {
-  const loaded = [1,2,3].filter(p => plates[p] === "loaded");
-  await fetch(q("/api/plates"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({loaded})});
-  plates = {}; refresh();
-}
-async function feedNow() {
-  if (!confirm("Open the feeder now? This ignores MIN_GAP and identification.")) return;
-  const r = await (await fetch(q("/api/feed-now"), {method:"POST"})).json(); alert(r.ok);
-}
-async function reloadRefs() {
-  const r = await (await fetch(q("/api/reload-references"), {method:"POST"})).json();
-  alert("reference photos: " + JSON.stringify(r.reference_counts));
-}
-async function loadConfig() {
-  const c = await (await fetch(q("/api/config"))).json();
-  document.getElementById("controls").innerHTML = CONTROLS.map(([k,t]) => t === "bool"
-    ? `<label>${k}<input type="checkbox" id="c_${k}" ${c[k] ? "checked" : ""}></label>`
-    : `<label>${k}<input type="${t}" step="any" id="c_${k}" value="${c[k]}"></label>`).join("");
-}
-async function saveConfig() {
-  const body = {};
-  for (const [k,t] of CONTROLS) { const el = document.getElementById("c_"+k); body[k] = t === "bool" ? el.checked : el.value; }
-  const r = await fetch(q("/api/config"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
-  if (!r.ok) alert("rejected: " + (await r.text())); else loadConfig();
-}
-async function loadEvents() {
-  const all = document.getElementById("allEvents").checked;
-  const evs = await (await fetch(q("/api/events?all=" + all))).json();
-  document.getElementById("events").innerHTML = evs.map(e =>
-    `<div class="ev"><span class="when">${e.at.replace("T"," ")}</span> <a href="${q("/events/"+e.id)}"><span class="kind">${e.kind}</span></a> ${e.reason}` +
-    (e.frames.length ? ` <a href="${q("/events/"+e.id)}">[${e.frames.length} frames]</a>` : "") + `</div>`).join("") || "<small>no events yet</small>";
-}
-refresh(); loadConfig(); loadEvents();
-setInterval(refresh, 3000); setInterval(loadEvents, 15000);
-</script></body></html>
-"""
+FALLBACK_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>animaleyes</title></head>
+<body style="background:#12150e;color:#ebecd7;font:16px system-ui;padding:24px">
+<h1>🐾 animaleyes</h1><p>The dashboard UI was not built into this image.</p>
+<p>Build with <code>docker compose up -d --build</code> (the frontend build stage compiles the React app).</p>
+<p>The API is up: <a style="color:#93c0a4" href="/api/status">/api/status</a></p>
+</body></html>"""
 
 EVENT_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>event {id}</title>
-<style>body{{background:#111;color:#eee;font:16px system-ui,sans-serif;padding:12px}}
-img{{width:100%;border-radius:8px;margin:6px 0}}pre{{background:#1c1c1c;padding:10px;border-radius:8px;white-space:pre-wrap}}
-a{{color:#6aa9ff}}</style></head><body>
-<a href="/?token={token}">&larr; dashboard</a>
-<h2>{kind} <small>#{id} · {at}</small></h2>
-<p>{reason}</p>
-<pre>{data}</pre>
+<style>
+ :root{{--bg:#0e0f13;--surface:#171920;--border:#2a2e3a;--fg:#e7e9ef;--muted:#949aa7;--accent:#6aa9ff}}
+ *{{box-sizing:border-box}}
+ body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}}
+ .wrap{{max-width:760px;margin:0 auto;padding:16px}}
+ a{{color:var(--accent);text-decoration:none}}
+ h2{{margin:10px 0 2px;font-size:20px}}
+ .meta{{color:var(--muted);font-size:13px;margin-bottom:14px}}
+ .reason{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;margin:12px 0}}
+ img{{width:100%;border-radius:12px;margin:8px 0;border:1px solid var(--border)}}
+ details{{margin-top:12px}} summary{{color:var(--muted);cursor:pointer;font-size:13px}}
+ pre{{background:var(--surface);border:1px solid var(--border);padding:12px;border-radius:12px;
+   white-space:pre-wrap;word-break:break-word;font-size:12px;color:var(--muted)}}
+</style></head><body><div class="wrap">
+<a href="/">&larr; Back to dashboard</a>
+<h2>{kind}</h2>
+<div class="meta">event #{id} · {at}</div>
+<div class="reason">{reason}</div>
 {images}
-</body></html>"""
+<details><summary>Raw data</summary><pre>{data}</pre></details>
+</div></body></html>"""

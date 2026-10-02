@@ -12,16 +12,19 @@ import base64
 import io
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import anthropic
 from PIL import Image
 
 from .camera import Frame
+from .detect import FeedingVerdict, Identifier, Verdict
 from .store import Store
+
+# Re-exported for backward compatibility: callers still do `from .vision import Verdict, ...`.
+__all__ = ["ClaudeIdentifier", "FeedingVerdict", "Identifier", "Verdict", "estimate_cost_usd"]
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,12 @@ Rules:
 - At night the camera uses infrared and the image is greyscale: a black coat is NOT a cue.
   Use body size, leg length, body proportions, ear and muzzle shape, and posture.
 - Bowie is much larger and lankier than Grrr. Grrr is small and low to the ground.
+- POC fallback when few or no reference photos are provided: identify by species and size
+  alone. The ONLY small dog in this home is Grrr, so classify any clearly small dog as
+  "grrr", a clearly larger or lankier dog as "bowie", and a cat as "cat". A cat is not a
+  small dog: tell them apart by the cat's shorter muzzle, triangular upright ears, long
+  tail, and lighter, more fluid gait. If you cannot tell a small dog from a cat, choose
+  "unsure" — never feed on a guess.
 - "at_bowl" is true only when the animal's head is at or in the bowl area, not merely nearby.
 - Answer with a single JSON object matching the schema you were given, nothing else."""
 
@@ -52,7 +61,9 @@ IDENTIFY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "animal": {"type": "string", "enum": ["grrr", "bowie", "cat", "none", "unsure"]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        # The structured-output API rejects minimum/maximum on numbers; the prompt states the
+        # 0..1 range and the machine clamps when reading confidence.
+        "confidence": {"type": "number"},
         "at_bowl": {"type": "boolean"},
         "other_animals_present": {
             "type": "array",
@@ -100,72 +111,6 @@ PRICES: dict[str, tuple[float, float]] = {
 CACHE_TTL = "1h"
 
 
-@dataclass
-class Verdict:
-    animal: str = "unsure"
-    confidence: float = 0.0
-    at_bowl: bool = False
-    other_animals_present: list[str] = field(default_factory=list)
-    reason: str = ""
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> Verdict:
-        return cls(
-            animal=str(data.get("animal", "unsure")),
-            confidence=float(data.get("confidence", 0.0)),
-            at_bowl=bool(data.get("at_bowl", False)),
-            other_animals_present=[str(a) for a in data.get("other_animals_present", [])],
-            reason=str(data.get("reason", "")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "animal": self.animal,
-            "confidence": self.confidence,
-            "at_bowl": self.at_bowl,
-            "other_animals_present": self.other_animals_present,
-            "reason": self.reason,
-        }
-
-    def is_grrr(self, min_confidence: float) -> bool:
-        return (
-            self.animal == "grrr"
-            and self.confidence >= min_confidence
-            and self.at_bowl
-            and not self.other_animals_present
-        )
-
-
-@dataclass
-class FeedingVerdict:
-    grrr_at_bowl: bool = False
-    bowl: str = "unsure"
-    other_animals_present: list[str] = field(default_factory=list)
-    reason: str = ""
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> FeedingVerdict:
-        return cls(
-            grrr_at_bowl=bool(data.get("grrr_at_bowl", False)),
-            bowl=str(data.get("bowl", "unsure")),
-            other_animals_present=[str(a) for a in data.get("other_animals_present", [])],
-            reason=str(data.get("reason", "")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "grrr_at_bowl": self.grrr_at_bowl,
-            "bowl": self.bowl,
-            "other_animals_present": self.other_animals_present,
-            "reason": self.reason,
-        }
-
-
-class Identifier(Protocol):
-    def identify(self, frames: list[Frame]) -> Verdict: ...
-    def feeding_check(self, frames: list[Frame]) -> FeedingVerdict: ...
-
-
 def estimate_cost_usd(model: str, usage: dict[str, int]) -> float:
     price_in, price_out = PRICES.get(model, PRICES["claude-opus-5"])
     return (
@@ -195,8 +140,11 @@ def image_block(jpeg: bytes) -> dict[str, Any]:
     }
 
 
-def load_reference_blocks(reference_dir: Path) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def load_reference_blocks(
+    reference_dir: Path, descriptions: dict[str, str] | None = None
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Content blocks for every reference photo, grouped and labelled per animal."""
+    descriptions = descriptions or ANIMAL_DESCRIPTIONS
     blocks: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     for animal in ANIMALS:
@@ -207,7 +155,7 @@ def load_reference_blocks(reference_dir: Path) -> tuple[list[dict[str, Any]], di
         )
         counts[animal] = len(paths)
         blocks.append(
-            {"type": "text", "text": f"Reference photos of {ANIMAL_DESCRIPTIONS[animal]}"}
+            {"type": "text", "text": f"Reference photos of {descriptions.get(animal, animal)}"}
         )
         for path in paths:
             blocks.append(image_block(to_jpeg(path.read_bytes())))
@@ -231,21 +179,30 @@ class ClaudeIdentifier:
         model: Callable[[], str],
         clock: Callable[[], datetime] = datetime.now,
         client: anthropic.Anthropic | None = None,
+        descriptions: Callable[[], dict[str, str]] | None = None,
     ):
         self.reference_dir = reference_dir
         self.store = store
         self.model = model
         self.clock = clock
         self.client = client or anthropic.Anthropic()
+        self.descriptions = descriptions or (lambda: ANIMAL_DESCRIPTIONS)
         self.reference_blocks: list[dict[str, Any]] = []
         self.reference_counts: dict[str, int] = {}
+        self._desc_used: dict[str, str] | None = None
         self.reload_references()
 
     def reload_references(self) -> None:
-        self.reference_blocks, self.reference_counts = load_reference_blocks(self.reference_dir)
+        desc = self.descriptions()
+        self.reference_blocks, self.reference_counts = load_reference_blocks(
+            self.reference_dir, desc
+        )
+        self._desc_used = dict(desc)
         log.info("reference photos: %s", self.reference_counts)
 
     def identify(self, frames: list[Frame]) -> Verdict:
+        if self.descriptions() != self._desc_used:  # a dashboard edit → rebuild the cached prefix
+            self.reload_references()
         data = self._ask("identify", frames, IDENTIFY_QUESTION, IDENTIFY_SCHEMA)
         return Verdict.from_json(data) if data else Verdict(reason="llm call failed")
 

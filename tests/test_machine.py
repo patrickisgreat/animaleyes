@@ -239,3 +239,128 @@ def test_camera_offline_is_reported_once(h: Harness) -> None:
     assert len(h.events("camera_offline")) == 1
     h.tick(motion=False)
     assert len(h.events("camera_online")) == 1
+
+
+def test_manual_rotate_runs_on_tick_and_logs(h: Harness) -> None:
+    h.machine.request_manual_action("rotate")
+    h.tick(motion=False)
+    assert "rotate" in h.feeder.calls
+    assert len(h.events("manual_rotate")) == 1
+
+
+def test_manual_open_and_close_route_through_the_machine(h: Harness) -> None:
+    h.machine.request_manual_action("open")
+    h.tick(motion=False)
+    assert h.feeder.opens == ["open:1"]
+    assert len(h.events("manual_open")) == 1
+    h.machine.request_manual_action("close")
+    h.tick(motion=False)
+    assert "close" in h.feeder.calls
+    assert len(h.events("manual_close")) == 1
+
+
+def test_manual_action_honors_dry_run(h: Harness) -> None:
+    h.config.update({"DRY_RUN": True})
+    h.machine.request_manual_action("open")
+    h.tick(motion=False)
+    assert h.feeder.calls == []  # real feeder untouched in dry run
+    assert h.events("manual_open")[0].data["mode"] == "DRY_RUN"
+
+
+def test_manual_action_failure_logs_and_does_not_raise(h: Harness) -> None:
+    h.feeder.fail_open = True
+    h.machine.request_manual_action("open")
+    h.tick(motion=False)
+    assert len(h.events("manual_open_failed")) == 1
+    assert h.events("manual_open") == []
+
+
+def test_unknown_manual_action_rejected(h: Harness) -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        h.machine.request_manual_action("explode")
+
+
+def test_two_compartment_absence_algorithm(h: Harness) -> None:
+    """The owner's POC algorithm: open 1 -> gone 10 min -> close -> return opens+rotates to
+    2 -> gone 10 min -> close -> DONE, never opening again. LEAVE_TIMEOUT_S=600, MIN_GAP_MIN=0."""
+    h.config.update({"LEAVE_TIMEOUT_S": 600, "MIN_GAP_MIN": 0})
+    h.load_plates(1, 2)
+
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    assert h.feeder.opens == ["open:1"]
+
+    # Gone just over 10 minutes -> close plate 1.
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=610, motion=False)
+    assert "close" in h.feeder.calls
+    h.tick(motion=False)
+    assert h.state() == "IDLE"  # MIN_GAP_MIN=0: ready again immediately, no hour-long wait
+
+    # Dog returns -> tray rotates to compartment 2 and opens.
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    assert h.feeder.opens == ["open:1", "open:2"]
+    assert "rotate" in h.feeder.calls
+
+    # Gone 10 min again -> close plate 2 -> no plates left -> DONE.
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=610, motion=False)
+    h.tick(motion=False)
+    assert h.state() == "DONE"
+    assert h.store.get_int("feeds_this_window") == 2
+
+    # Terminated: even a confirmed dog does not open a third time.
+    confirm_grrr(h)
+    assert h.state() == "DONE"
+    assert h.feeder.opens == ["open:1", "open:2"]
+
+
+class _FakeEvents:
+    def __init__(self):
+        self.last_error = None
+        self.motion_state = False
+        self.animal_state = False
+        self.on = False
+
+    def motion_within(self, now, hold_s):
+        return self.on
+
+
+def test_camera_events_drive_motion_when_source_is_camera(h: Harness) -> None:
+    ev = _FakeEvents()
+    h.machine.events = ev
+    h.config.update({"MOTION_SOURCE": "camera"})
+    h.load_plates(1)
+    h.tick(motion=False)  # frame-diff off, camera quiet
+    assert h.state() == "IDLE"
+    ev.on = True
+    h.tick(motion=False)  # camera reports motion -> WATCHING (no frame-diff needed)
+    assert h.state() == "WATCHING"
+
+
+def test_falls_back_to_frame_diff_when_events_unhealthy(h: Harness) -> None:
+    ev = _FakeEvents()
+    ev.last_error = "subscription failed"
+    ev.on = True  # would say motion, but it's broken so must be ignored
+    h.machine.events = ev
+    h.config.update({"MOTION_SOURCE": "camera"})
+    h.load_plates(1)
+    h.tick(motion=False)
+    assert h.state() == "IDLE"  # broken events ignored, frame-diff quiet
+    h.tick(motion=True)  # frame-diff fallback still feeds the dog
+    assert h.state() == "WATCHING"
+
+
+def test_feed_failure_backs_off_before_retrying(h: Harness) -> None:
+    h.feeder.fail_open = True
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert h.events("feed_failed")
+    assert h.state() in ("IDLE", "WATCHING")
+    # Immediately re-confirming must NOT hammer the feeder during the backoff window.
+    opens_before = len(h.feeder.opens)
+    confirm_grrr(h)
+    assert len(h.feeder.opens) == opens_before  # blocked by FEED_RETRY_BACKOFF_S

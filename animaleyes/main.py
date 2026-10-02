@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from .camera import Camera, FrameBuffer
 from .config import DEFAULT_CONFIG_PATH, ConfigStore, Secrets
 from .dashboard import create_app
+from .detect import Identifier
+from .events import ReolinkEvents
 from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
@@ -28,6 +30,7 @@ from .vision import ClaudeIdentifier
 log = logging.getLogger("animaleyes")
 
 DATA_DIR = Path(os.environ.get("ANIMALEYES_DATA", "data"))
+FRONTEND_DIST = Path(os.environ.get("ANIMALEYES_FRONTEND", "frontend/dist"))
 TICK_S = 0.5
 LOOP_ERROR_REPEAT_S = 600
 
@@ -50,14 +53,66 @@ class UnavailableFeeder:
     def close(self) -> None:
         raise FeederError(self.error)
 
+    def manual_feed_active(self) -> bool:
+        raise FeederError(self.error)
 
-def build(secrets: Secrets) -> tuple[Machine, Camera, ConfigStore, Store, ClaudeIdentifier]:
+
+def _yolo(config: ConfigStore):
+    from .yolo import YoloConfig, YoloIdentifier
+
+    s = config.load()
+    return YoloIdentifier(
+        s.YOLO_MODEL,
+        YoloConfig(min_conf=s.YOLO_MIN_CONF, grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION),
+    )
+
+
+def _claude(config: ConfigStore, store: Store):
+    def descriptions() -> dict[str, str]:
+        s = config.load()
+        return {"grrr": s.GRRR_DESC, "bowie": s.BOWIE_DESC, "cat": s.CAT_DESC}
+
+    return ClaudeIdentifier(
+        DATA_DIR / "reference",
+        store,
+        model=lambda: config.load().LLM_MODEL,
+        descriptions=descriptions,
+    )
+
+
+def build_identifier(name: str, config: ConfigStore, store: Store):
+    """Select the detector backend by config. Backends share the Identifier interface, so the
+    state machine is unchanged whichever is chosen."""
+    if name == "yolo":
+        log.info("identifier: YOLO (local only)")
+        return _yolo(config)
+    if name == "cascade":
+        from .cascade import CascadeIdentifier
+
+        log.info("identifier: cascade (YOLO gate → Claude confirm)")
+        return CascadeIdentifier(
+            gate=_yolo(config),
+            confirm=_claude(config, store),
+            config=config,
+            training_dir=DATA_DIR / "training",
+        )
+    log.info("identifier: Claude (%s)", config.load().LLM_MODEL)
+    return _claude(config, store)
+
+
+def build(
+    secrets: Secrets,
+) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
     frames = FrameBuffer()
     motion = MotionDetector()
     camera = Camera(secrets, frames, on_frame=motion.feed)
-    llm = ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+    llm = build_identifier(config.load().IDENTIFIER, config, store)
+    events: ReolinkEvents | None = None
+    if secrets.kasa_stream_url:
+        # Camera-driven motion gate (ONVIF). Keeps the LLM from firing on frame-diff noise.
+        events = ReolinkEvents(secrets.kasa_stream_url, secrets.kasa_camera_mac)
     try:
         feeder = PetlibroCli(secrets.petlibro_serial)
     except FeederError as exc:
@@ -75,9 +130,9 @@ def build(secrets: Secrets) -> tuple[Machine, Camera, ConfigStore, Store, Claude
         clock=datetime.now,
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
-        dash_token=secrets.dash_token,
+        events=events,
     )
-    return machine, camera, config, store, llm
+    return machine, camera, config, store, llm, events
 
 
 def run_loop(machine: Machine, stop: threading.Event) -> None:
@@ -100,11 +155,13 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     secrets = Secrets.from_env()
-    if not secrets.dash_token:
-        raise SystemExit("DASH_TOKEN must be set")
-    machine, camera, config, store, llm = build(secrets)
+    if not (secrets.dash_user and secrets.dash_password):
+        raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
+    machine, camera, config, store, llm, events = build(secrets)
     if secrets.kasa_stream_url:
         camera.start()
+        if events is not None:
+            events.start()
     else:
         log.warning("KASA_STREAM_URL is not set; running without a camera")
     machine.start()
@@ -118,14 +175,22 @@ def main() -> None:
         secrets,
         DATA_DIR / "frames",
         reload_references=llm.reload_references,
+        reference_dir=DATA_DIR / "reference",
+        training_dir=DATA_DIR / "training",
+        frontend_dist=FRONTEND_DIST,
     )
     try:
         uvicorn.run(
-            app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), log_level="warning"
+            app,
+            host=os.environ.get("HOST", "127.0.0.1"),
+            port=int(os.environ.get("PORT", "8081")),
+            log_level="warning",
         )
     finally:
         stop.set()
         camera.stop()
+        if events is not None:
+            events.stop()
         worker.join(timeout=5)
 
 

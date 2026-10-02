@@ -1,0 +1,93 @@
+import { useEffect, useState } from "react";
+import type { Status } from "../lib/api";
+import { api } from "../lib/api";
+import { Button, Card } from "../lib/ui";
+import { useToast } from "../lib/ui";
+
+export function Feeder({ s, refresh }: { s: Status | null; refresh: () => void }) {
+  const toast = useToast();
+  const pokeRefresh = () => [700, 1400, 2100, 2800, 3500, 4200].forEach((d) => setTimeout(refresh, d));
+
+  async function act(action: string) {
+    if (!confirm(`${action[0].toUpperCase() + action.slice(1)} the feeder now?`)) return;
+    await api.post(`/api/feeder/${action}`);
+    toast(`${action[0].toUpperCase() + action.slice(1)} requested`);
+    pokeRefresh();
+  }
+  async function feedNow() {
+    if (!confirm("Feed now? This opens the feeder, skipping identification.")) return;
+    await api.post("/api/feed-now");
+    toast("Feed requested");
+    pokeRefresh();
+  }
+
+  const feeds = s?.feeds_this_window ?? 0;
+  return (
+    <Card title="Feeder">
+      <div className="flex flex-wrap gap-2 mb-3">
+        <span className={`pill ${s?.lid_open ? "text-teal border-teal/40" : "text-muted"}`}>
+          {s?.lid_open ? "lid open" : "lid closed"}
+        </span>
+        <span className="pill text-sage">{s?.current_plate ? `plate ${s.current_plate}` : "plate —"}</span>
+        <span className="pill text-beige">{feeds} feed{feeds === 1 ? "" : "s"} tonight</span>
+        <span className={`pill ${s?.dry_run ? "text-pearl border-pearl/40" : "text-teal border-teal/40"}`}>
+          {s?.dry_run ? "dry run" : "live"}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="primary" onClick={feedNow}>Feed now</Button>
+        <Button onClick={() => act("open")}>Open</Button>
+        <Button onClick={() => act("close")}>Close</Button>
+        <Button onClick={() => act("rotate")}>Rotate</Button>
+      </div>
+      <div className="text-muted text-xs mt-2.5">
+        Buttons ask the feeder to act on its next check (a second or two). Nothing moves in dry‑run mode.
+      </div>
+    </Card>
+  );
+}
+
+export function Plates({ s, refresh }: { s: Status | null; refresh: () => void }) {
+  const toast = useToast();
+  const [plates, setPlates] = useState<Record<string, string>>({});
+
+  // seed from status once
+  useEffect(() => {
+    if (s && Object.keys(plates).length === 0) setPlates(s.plates);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s]);
+
+  const toggle = (p: number) =>
+    setPlates((x) => ({ ...x, [p]: x[String(p)] === "loaded" ? "empty" : "loaded" }));
+  async function save() {
+    const loaded = [1, 2, 3].filter((p) => plates[String(p)] === "loaded");
+    await api.post("/api/plates", { loaded });
+    setPlates({});
+    toast("Loaded plates saved");
+    refresh();
+  }
+
+  return (
+    <Card title="Food loaded">
+      <div className="flex flex-wrap gap-2">
+        {[1, 2, 3].map((p) => {
+          const on = plates[String(p)] === "loaded";
+          return (
+            <button
+              key={p}
+              onClick={() => toggle(p)}
+              className={`px-3.5 min-h-[42px] rounded-[10px] border font-bold flex items-center gap-2
+                ${on ? "bg-sage/15 text-sage border-sage/40" : "bg-surface2 text-ink border-edge"}`}
+            >
+              Bowl {p}<span className="opacity-70 text-xs">{on ? "full" : "empty"}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-3"><Button variant="primary" sm onClick={save}>Save loaded plates</Button></div>
+      <div className="text-muted text-xs mt-2.5">
+        Mark which bowls you filled. Saving resets the night's count and re‑arms the feeder.
+      </div>
+    </Card>
+  );
+}

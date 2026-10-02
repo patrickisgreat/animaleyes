@@ -1,0 +1,54 @@
+import type { Status } from "./api";
+import { NAMES } from "./api";
+
+// state -> [label, sublabel, dot tone]
+export const STATES: Record<string, [string, string, string]> = {
+  OUTSIDE_WINDOW: ["Off hours", "Outside the active feeding window", "muted"],
+  IDLE: ["Watching", "Waiting for something to move at the bowl", "teal"],
+  WATCHING: ["Checking", "Figuring out who's at the bowl", "sage"],
+  OPENING: ["Opening", "Opening the feeder", "pearl"],
+  FEEDING: ["Feeding", "Lid is open — Grrr is eating", "teal"],
+  CLOSING: ["Closing", "Closing the feeder", "pearl"],
+  COOLDOWN: ["Cooldown", "Waiting before the next feed", "muted"],
+  DONE: ["Done", "Finished for this window", "muted"],
+};
+
+export const EVENTS: Record<string, [string, string]> = {
+  open: ["🍽️", "Fed"], close: ["✅", "Closed"], veto: ["🚫", "Blocked — wrong animal"],
+  feed_failed: ["⚠️", "Feed failed"], close_failed: ["⚠️", "Close failed"],
+  wanted_food_none_left: ["🙁", "Wanted food, none left"], startup: ["▶️", "Started up"],
+  bowie_during_feed: ["🐕", "Bowie during feeding"], cat_during_feed: ["🐈", "Cat during feeding"],
+  camera_offline: ["📵", "Camera offline"], camera_online: ["📶", "Camera back online"],
+  plates_set: ["🥣", "Plates updated"], grrr_blocked: ["⏳", "Grrr seen, not fed yet"],
+  manual_open: ["🖐️", "Opened by hand"], manual_close: ["🖐️", "Closed by hand"],
+  manual_rotate: ["🔄", "Rotated by hand"], manual_open_failed: ["⚠️", "Manual open failed"],
+  manual_close_failed: ["⚠️", "Manual close failed"], manual_rotate_failed: ["⚠️", "Manual rotate failed"],
+  config: ["⚙️", "Settings changed"],
+};
+
+export const fmtAge = (s: number | null) =>
+  s == null ? "—" : s < 90 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
+export const fmtIn = (s: number) => (!s ? "now" : s < 90 ? `in ${s}s` : `in ${Math.round(s / 60)}m`);
+
+export function verdictText(s: Status): { who: string; why: string } {
+  const v = s.last_verdict;
+  if (!v) return { who: "Nothing yet", why: "No animal checked since the last feed" };
+  if (v.animal === "none") return { who: "No animal at the bowl", why: v.reason || "" };
+  if (v.animal === "unsure") return { who: "Not sure who that is", why: v.reason || "" };
+  const pct = Math.round((v.confidence || 0) * 100);
+  const extra = v.other_animals_present?.length
+    ? " · also " + v.other_animals_present.map((a) => NAMES[a] || a).join(", ")
+    : "";
+  return {
+    who: `${NAMES[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}`,
+    why: v.reason || "",
+  };
+}
+
+export function motionText(s: Status): string {
+  if (s.motion_source !== "camera") return "frame diff";
+  if (s.camera_events_ok === false) return "events down";
+  if (s.camera_animal) return "🐾 animal";
+  if (s.camera_motion) return "motion";
+  return "quiet";
+}

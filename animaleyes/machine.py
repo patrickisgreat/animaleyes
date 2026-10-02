@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from .camera import FrameBuffer
+from .camera import Frame, FrameBuffer
 from .config import ConfigStore, Settings
 from .feeder import Feeder, FeederError
 from .motion import MotionDetector
@@ -61,12 +61,13 @@ class Machine:
         clock: Callable[[], datetime],
         frames_dir: Path,
         dashboard_url: str = "",
-        dash_token: str = "",
+        events=None,
     ):
         self.config = config
         self.store = store
         self.frames = frames
         self.motion = motion
+        self.events = events
         self.llm = llm
         self.real_feeder = feeder
         self.dry_feeder = dry_feeder
@@ -74,9 +75,9 @@ class Machine:
         self.clock = clock
         self.frames_dir = frames_dir
         self.dashboard_url = dashboard_url
-        self.dash_token = dash_token
         self.verdicts: deque[Verdict] = deque(maxlen=VERDICT_HISTORY)
         self.last_verdict: Verdict | FeedingVerdict | None = None
+        self.judged_frames: list[Frame] = []
         self.last_llm_at: datetime | None = None
         self.last_feeding_verdict: FeedingVerdict | None = None
         self.last_heartbeat_at: datetime | None = None
@@ -131,6 +132,7 @@ class Machine:
         now = self.clock()
         self._check_camera(now)
         self._heartbeat(now)
+        self._poll_lid(now)
         self._consume_dashboard_requests(now)
 
         state = self.state
@@ -173,7 +175,8 @@ class Machine:
             return
         if not self._llm_due(now, self.settings.LLM_MIN_INTERVAL_S):
             return
-        verdict = self.llm.identify(self.frames.latest(3))
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.identify(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
         self.verdicts.append(verdict)
@@ -193,14 +196,20 @@ class Machine:
         try:
             plate = self._plate_under_lid(feeder)
             self.store.set("opening_plate", plate)
+            self.store.set("current_plate", plate)
             feeder.open_now(plate)
         except FeederError as exc:
+            # Back off so a failing feeder isn't hammered every tick (which drains the device
+            # and spams the cloud). The dog's return after the window still re-triggers later.
+            self.store.set("feed_failed_at", now.isoformat())
             event_id = self.store.add_event(
                 now, "feed_failed", str(exc), {"trigger": trigger, "mode": mode}, frames
             )
             self._notify(f"FEED FAILED ({mode}): {exc}", event_id)
             self._transition(State.IDLE, "feed failed", error=str(exc))
             return
+        self.store.set("feed_failed_at", None)
+        self.store.set("lid_actual_open", 1)
         loaded = self.store.loaded_plates()
         self.store.set("feeding_plate", plate)
         self.store.set("opened_at", now.isoformat())
@@ -239,7 +248,8 @@ class Machine:
             return
         if not self._llm_due(now, self.settings.FEEDING_POLL_S):
             return
-        verdict = self.llm.feeding_check(self.frames.latest(3))
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.feeding_check(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
         self.last_feeding_verdict = verdict
@@ -291,6 +301,7 @@ class Machine:
                 f"Loaded plates left: {self.store.loaded_plates()}",
                 event_id,
             )
+        self.store.set("lid_actual_open", 0)
         self.verdicts.clear()
         self._transition(State.COOLDOWN, "lid closed", **data)
 
@@ -314,7 +325,8 @@ class Machine:
         if self.done_motion_seen:
             return
         self.done_motion_seen = True
-        verdict = self.llm.identify(self.frames.latest(3))
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.identify(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
         if verdict.animal == "grrr":
@@ -329,7 +341,18 @@ class Machine:
 
     # helpers -----------------------------------------------------------
     def _motion(self, now: datetime) -> bool:
-        return self.motion.motion_within(now, self.settings.MOTION_HOLD_S)
+        hold_s = self.settings.MOTION_HOLD_S
+        # Prefer the camera's own motion/animal events (cheap, selective) so the LLM only
+        # wakes when the camera sees something. Fall back to frame-differencing if the event
+        # source is unavailable or its subscription is currently failing, so a broken ONVIF
+        # link can never silently stop the dog from being fed.
+        if (
+            self.events is not None
+            and self.settings.MOTION_SOURCE == "camera"
+            and getattr(self.events, "last_error", "unset") is None
+        ):
+            return self.events.motion_within(now, hold_s)
+        return self.motion.motion_within(now, hold_s)
 
     def _llm_due(self, now: datetime, interval_s: float) -> bool:
         return self.last_llm_at is None or now - self.last_llm_at >= timedelta(seconds=interval_s)
@@ -337,7 +360,10 @@ class Machine:
     def _grrr_confirmed(self) -> bool:
         needed = self.settings.CONFIRMATIONS_REQUIRED
         recent = list(self.verdicts)[-needed:]
-        return len(recent) >= needed and all(v.is_grrr(self.settings.GRRR_MIN_CONF) for v in recent)
+        require_bowl = self.settings.OPEN_REQUIRES_AT_BOWL
+        return len(recent) >= needed and all(
+            v.is_grrr(self.settings.GRRR_MIN_CONF, require_bowl) for v in recent
+        )
 
     def _open_blocker(self, now: datetime) -> str | None:
         if not self.store.loaded_plates():
@@ -345,6 +371,9 @@ class Machine:
         last_open = self._when("last_open_at")
         if last_open and now - last_open < timedelta(minutes=self.settings.MIN_GAP_MIN):
             return f"last open {int((now - last_open).total_seconds() // 60)} min ago < MIN_GAP_MIN"
+        failed = self._when("feed_failed_at")
+        if failed and now - failed < timedelta(seconds=self.settings.FEED_RETRY_BACKOFF_S):
+            return f"feed failed {int((now - failed).total_seconds())}s ago < FEED_RETRY_BACKOFF_S"
         return None
 
     def _check_veto(self, now: datetime) -> None:
@@ -395,8 +424,12 @@ class Machine:
         if notify:
             self._notify(f"{kind}: {reason}", event_id)
 
-    def _save_frames(self, tag: str) -> list[str]:
-        frames = self.frames.latest(3)
+    def _save_frames(self, tag: str, frames: list[Frame] | None = None) -> list[str]:
+        # Default to the exact frames the detector just judged (self.judged_frames) so an
+        # event's images show what the decision was actually made on — the LLM call takes a
+        # second or two, during which a passing cat can leave frame, so grabbing fresh frames
+        # here would save an empty scene. Falls back to the latest frames when none were judged.
+        frames = frames if frames is not None else (self.judged_frames or self.frames.latest(3))
         names: list[str] = []
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         for i, frame in enumerate(frames):
@@ -406,10 +439,9 @@ class Machine:
         return names
 
     def _notify(self, text: str, event_id: int | None = None) -> None:
-        # The link carries the dashboard token so it opens straight from the phone.
-        # Acceptable for a private Slack workspace; v1 should use a session cookie instead.
+        # No credentials in the link; the browser asks for the dashboard's basic auth.
         if event_id and self.dashboard_url:
-            text = f"{text}\n{self.dashboard_url}/events/{event_id}?token={self.dash_token}"
+            text = f"{text}\n{self.dashboard_url}/events/{event_id}"
         self.notifier.send(text)
 
     def _check_camera(self, now: datetime) -> None:
@@ -439,6 +471,22 @@ class Machine:
             f"camera={'OFFLINE' if self.camera_offline else 'ok'}"
         )
 
+    def _poll_lid(self, now: datetime) -> None:
+        """Read the feeder's real lid state so the dashboard reflects opens done out-of-band
+        (e.g. from the PetLibro app), not just opens the machine made. Throttled, best-effort;
+        uses _feeder() so DRY_RUN never touches the real device."""
+        interval = self.settings.LID_POLL_S
+        if interval <= 0:
+            return
+        last = self._when("lid_checked_at")
+        if last and (now - last).total_seconds() < interval:
+            return
+        self.store.set("lid_checked_at", now.isoformat())
+        try:
+            self.store.set("lid_actual_open", 1 if self._feeder().manual_feed_active() else 0)
+        except FeederError:
+            pass  # leave the last known value rather than guessing
+
     def _consume_dashboard_requests(self, now: datetime) -> None:
         if self.store.get("plates_updated"):
             self.store.set("plates_updated", None)
@@ -451,6 +499,15 @@ class Machine:
                     {"loaded_plates": self.store.loaded_plates()},
                 )
                 self._transition(State.IDLE, "plates set from dashboard")
+        # Manual feeder controls from the dashboard. Per the invariant, the page only sets
+        # these flags; the machine is still the sole caller of the feeder. POC: these are
+        # raw maintenance actions (open/close/rotate the tray by hand); they log an event and
+        # honour DRY_RUN but deliberately do not touch the feeding counters or FSM state.
+        for action in ("open", "close", "rotate"):
+            if self.store.get(f"manual_{action}_requested"):
+                self.store.set(f"manual_{action}_requested", None)
+                self._manual_action(now, action)
+
         if self.store.get("feed_now_requested"):
             self.store.set("feed_now_requested", None)
             if self.state in (State.FEEDING, State.CLOSING, State.OPENING):
@@ -459,8 +516,44 @@ class Machine:
             self._transition(State.OPENING, "manual feed from dashboard")
             self._tick_opening(now, trigger="manual feed from dashboard")
 
+    def _manual_action(self, now: datetime, action: str) -> None:
+        feeder = self._feeder()
+        mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
+        try:
+            if action == "open":
+                plate = self._plate_under_lid(feeder)
+                feeder.open_now(plate)
+                self.store.set("current_plate", plate)
+                self.store.set("lid_manual_open", 1)
+                self.store.set("lid_actual_open", 1)
+                detail = {"mode": mode, "plate": plate}
+            elif action == "close":
+                feeder.close()
+                self.store.set("lid_manual_open", None)
+                self.store.set("lid_actual_open", 0)
+                detail = {"mode": mode}
+            else:  # rotate
+                feeder.rotate()
+                plate = feeder.current_plate()
+                self.store.set("current_plate", plate)
+                detail = {"mode": mode, "plate": plate}
+        except FeederError as exc:
+            event_id = self.store.add_event(
+                now, f"manual_{action}_failed", str(exc), {"mode": mode}
+            )
+            self._notify(f"manual {action} FAILED ({mode}): {exc}", event_id)
+            return
+        event_id = self.store.add_event(now, f"manual_{action}", f"dashboard ({mode})", detail)
+        self._notify(f"manual {action} ({mode})", event_id)
+
     def request_feed_now(self) -> None:
         self.store.set("feed_now_requested", 1)
+
+    def request_manual_action(self, action: str) -> None:
+        """Enqueue a raw open/close/rotate for the machine to perform on its next tick."""
+        if action not in ("open", "close", "rotate"):
+            raise ValueError(f"unknown feeder action {action!r}")
+        self.store.set(f"manual_{action}_requested", 1)
 
     def _status_data(self) -> dict[str, Any]:
         return {

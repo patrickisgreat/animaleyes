@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+body {
+  margin: 0;
+  color: theme("colors.ink");
+  background:
+    radial-gradient(1100px 520px at 12% -8%, rgba(147, 192, 164, 0.1), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(212, 205, 171, 0.07), transparent 55%),
+    theme("colors.bg");
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* thin, themed scrollbars */
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: theme("colors.edge"); border-radius: 8px; }
+
+@layer components {
+  .card {
+    @apply bg-surface border border-edge rounded-xl2 p-4;
+  }
+  .h2 {
+    @apply text-[12px] font-extrabold uppercase tracking-[0.09em] text-teal mb-3;
+  }
+  .btn {
+    @apply font-bold border border-edge bg-surface2 text-ink rounded-[10px] px-[14px] min-h-[42px]
+           cursor-pointer transition hover:border-ash/70 active:translate-y-px
+           disabled:opacity-50 disabled:cursor-default inline-flex items-center justify-center gap-2;
+  }
+  .btn-primary { @apply bg-teal text-[#122018] border-transparent hover:brightness-105; }
+  .btn-danger  { @apply bg-bad/15 text-bad border-bad/40; }
+  .btn-sm      { @apply min-h-[36px] px-[11px] text-[13px]; }
+  .pill {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-full font-bold text-[13px]
+           border border-edge bg-surface2 text-pearl;
+  }
+  .input {
+    @apply bg-bg text-ink border border-edge rounded-lg px-2.5 py-2 text-[16px] min-w-[120px] max-w-[170px];
+  }
+  .tile {
+    @apply bg-surface2 border border-edge border-l-[3px] rounded-[10px] px-3 py-2.5;
+  }
+}
