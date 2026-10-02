@@ -21,6 +21,7 @@ const CONTROLS: Ctl[] = [
   { key: "MAX_ROTATE_FOR_FOOD", label: "Max rotations hunting for food", type: "number", group: "Plate verification" },
   { key: "VERIFY_POLL_S", label: "Food check interval (sec)", type: "number", group: "Plate verification" },
   { key: "VERIFY_TIMEOUT_S", label: "Give up verifying after (sec)", type: "number", group: "Plate verification" },
+  { key: "CAMERA_FPS", label: "Live video FPS (restart to apply)", type: "number", group: "Motion & sensing" },
   { key: "MOTION_SOURCE", label: "Motion source", type: "select", group: "Motion & sensing", opts: ["camera", "frames"] },
   { key: "MOTION_HOLD_S", label: "Keep watching after motion (sec)", type: "number", group: "Motion & sensing" },
   { key: "LLM_MIN_INTERVAL_S", label: "Min seconds between checks", type: "number", group: "Motion & sensing" },
