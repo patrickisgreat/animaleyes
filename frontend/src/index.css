@@ -63,3 +63,6 @@ body {
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
 }
+
+/* Live view fills the screen when the browser puts it in fullscreen (object-contain centers it). */
+.live-box:fullscreen { aspect-ratio: auto; border-radius: 0; width: 100vw; height: 100vh; }

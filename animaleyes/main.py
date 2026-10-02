@@ -125,9 +125,10 @@ def build(
 ) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
-    frames = FrameBuffer()
+    fps = max(1, config.load().CAMERA_FPS)
+    frames = FrameBuffer(size=max(12, fps * 4))  # ~4s of history regardless of fps
     motion = MotionDetector()
-    camera = Camera(secrets, frames, on_frame=motion.feed)
+    camera = Camera(secrets, frames, on_frame=motion.feed, fps=fps)
     llm = build_identifier(config.load().IDENTIFIER, config, store)
     events: ReolinkEvents | None = None
     if secrets.kasa_stream_url:

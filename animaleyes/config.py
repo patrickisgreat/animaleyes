@@ -34,6 +34,7 @@ class Settings:
     MOTION_PIXEL_FRACTION: float = 0.02
     MOTION_HOLD_S: int = 20
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
+    CAMERA_FPS: int = 8  # frames/sec ffmpeg pulls; higher = smoother live view (restart to apply)
     FEED_RETRY_BACKOFF_S: int = 120  # after a failed open, wait before trying to open again
     LID_POLL_S: int = 20  # how often to read the feeder's real lid state (0 = never)
     # Dashboard auth: "tailscale" = trust any device on the tailnet (no password), basic-auth

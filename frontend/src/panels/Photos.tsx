@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { ANIMALS, NAMES, api } from "../lib/api";
-import { Button, Card, useToast } from "../lib/ui";
+import { Button, Card, useLightbox, useToast } from "../lib/ui";
 
 function PhotoGrid({ set, animal, reload }: { set: string; animal: string; reload: number }) {
   const toast = useToast();
+  const lightbox = useLightbox();
   const [data, setData] = useState<{ total: number; files: string[] }>({ total: 0, files: [] });
   const load = () => api.photos(set, animal).then(setData).catch(() => {});
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [animal, reload]);
 
+  const src = (n: string) => `/photos/${set}/${animal}/${encodeURIComponent(n)}`;
   const others = ANIMALS.filter((a) => a !== animal);
   async function del(n: string) { await api.del(`/api/photos/${set}/${animal}/${encodeURIComponent(n)}`); toast("Deleted"); load(); }
   async function retag(n: string, to: string) {
@@ -18,9 +20,15 @@ function PhotoGrid({ set, animal, reload }: { set: string; animal: string; reloa
   if (!data.files.length) return <div className="text-muted text-xs">none yet</div>;
   return (
     <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(92px,1fr))]">
-      {data.files.map((n) => (
+      {data.files.map((n, i) => (
         <div key={n} className="relative rounded-lg overflow-hidden border border-edge aspect-square bg-black group">
-          <img loading="lazy" src={`/photos/${set}/${animal}/${encodeURIComponent(n)}`} className="w-full h-full object-cover" />
+          <img
+            loading="lazy"
+            src={src(n)}
+            onClick={() => lightbox(data.files.map(src), i)}
+            className="w-full h-full object-cover cursor-zoom-in"
+            title="click to enlarge"
+          />
           <div className="absolute inset-x-0 bottom-0 flex justify-center gap-1 p-1 bg-black/75
                           opacity-100 md:opacity-0 md:group-hover:opacity-100 transition">
             <button title="delete" onClick={() => del(n)} className="btn btn-sm !min-h-0 !px-1.5 !py-1 text-[10px] text-bad border-bad/40">✕</button>

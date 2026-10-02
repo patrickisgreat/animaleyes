@@ -177,12 +177,14 @@ class Camera(threading.Thread):
         buffer: FrameBuffer,
         on_frame: Callable[[Frame], None] | None = None,
         clock: Callable[[], datetime] = datetime.now,
+        fps: int = 2,
     ):
         super().__init__(name="camera", daemon=True)
         self.secrets = secrets
         self.buffer = buffer
         self.on_frame = on_frame
         self.clock = clock
+        self.fps = max(1, fps)
         self.stop_event = threading.Event()
         self.last_error: str | None = None
 
@@ -203,7 +205,7 @@ class Camera(threading.Thread):
             self.stop_event.wait(backoff)
 
     def _stream_once(self) -> None:
-        cmd = build_ffmpeg_command(self.secrets)
+        cmd = build_ffmpeg_command(self.secrets, fps=self.fps)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdout is not None
         pending = bytearray()

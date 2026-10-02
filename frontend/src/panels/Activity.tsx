@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { api, usePoll } from "../lib/api";
 import type { EventItem } from "../lib/api";
-import { Card } from "../lib/ui";
+import { Card, useLightbox } from "../lib/ui";
 import { EVENTS } from "../lib/labels";
 
 export function Activity() {
   const [all, setAll] = useState(false);
   const [evs] = usePoll<EventItem[]>(() => api.events(all), 15000);
+  const lightbox = useLightbox();
 
   return (
     <Card
@@ -34,10 +35,21 @@ export function Activity() {
                 <div className="text-muted text-xs mt-0.5 break-words">
                   {when}
                   {e.reason ? " · " + e.reason : ""}
-                  {e.frames.length ? (
-                    <> · <a className="text-teal" href={`/events/${e.id}`}>{e.frames.length} frame{e.frames.length === 1 ? "" : "s"}</a></>
-                  ) : null}
                 </div>
+                {e.frames.length > 0 && (
+                  <div className="flex gap-1.5 mt-2 flex-wrap">
+                    {e.frames.map((f, i) => (
+                      <img
+                        key={f}
+                        loading="lazy"
+                        src={`/frames/${encodeURIComponent(f)}`}
+                        onClick={() => lightbox(e.frames.map((n) => `/frames/${encodeURIComponent(n)}`), i)}
+                        className="w-16 h-16 object-cover rounded-md border border-edge cursor-zoom-in bg-black"
+                        title="click to enlarge"
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           );

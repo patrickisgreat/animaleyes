@@ -40,7 +40,7 @@ Credentials = Annotated[
     HTTPBasicCredentials | None, Depends(HTTPBasic(auto_error=False, realm="animaleyes"))
 ]
 
-STREAM_POLL_S = 0.1
+STREAM_POLL_S = 0.05  # poll the buffer often enough to pass through higher camera FPS smoothly
 # The page reconnects when a stream ends, so a tab left open on a phone cannot hold a
 # connection through the tunnel forever.
 STREAM_MAX_S = 600

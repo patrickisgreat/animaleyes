@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 // ---- Toasts -------------------------------------------------------------
@@ -28,6 +28,62 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         ))}
       </div>
     </ToastCtx.Provider>
+  );
+}
+
+// ---- Lightbox -----------------------------------------------------------
+// Click any snapshot to view it full-size, with ← → between a set and Esc to close.
+type LightboxState = { srcs: string[]; i: number } | null;
+const LightboxCtx = createContext<(srcs: string[], i?: number) => void>(() => {});
+export const useLightbox = () => useContext(LightboxCtx);
+
+export function LightboxProvider({ children }: { children: ReactNode }) {
+  const [box, setBox] = useState<LightboxState>(null);
+  const open = useCallback((srcs: string[], i = 0) => srcs.length && setBox({ srcs, i }), []);
+  const close = useCallback(() => setBox(null), []);
+  const step = useCallback(
+    (d: number) => setBox((b) => (b ? { ...b, i: (b.i + d + b.srcs.length) % b.srcs.length } : b)),
+    [],
+  );
+  useEffect(() => {
+    if (!box) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+      else if (e.key === "ArrowRight") step(1);
+      else if (e.key === "ArrowLeft") step(-1);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [box, close, step]);
+
+  const many = (box?.srcs.length ?? 0) > 1;
+  return (
+    <LightboxCtx.Provider value={open}>
+      {children}
+      {box && (
+        <div
+          onClick={close}
+          className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-sm grid place-items-center p-4"
+        >
+          <img
+            src={box.srcs[box.i]}
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            alt="snapshot"
+          />
+          <button onClick={close} className="btn btn-sm absolute top-4 right-4 bg-black/60" title="close">✕</button>
+          {many && (
+            <>
+              <button onClick={(e) => { e.stopPropagation(); step(-1); }} className="btn absolute left-4 top-1/2 -translate-y-1/2 bg-black/60 !px-3 text-xl" title="previous">‹</button>
+              <button onClick={(e) => { e.stopPropagation(); step(1); }} className="btn absolute right-4 top-1/2 -translate-y-1/2 bg-black/60 !px-3 text-xl" title="next">›</button>
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-white/80 bg-black/60 px-3 py-1 rounded-full">
+                {box.i + 1} / {box.srcs.length}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </LightboxCtx.Provider>
   );
 }
 
