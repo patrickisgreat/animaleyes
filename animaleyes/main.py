@@ -30,6 +30,7 @@ from .vision import ClaudeIdentifier
 log = logging.getLogger("animaleyes")
 
 DATA_DIR = Path(os.environ.get("ANIMALEYES_DATA", "data"))
+FRONTEND_DIST = Path(os.environ.get("ANIMALEYES_FRONTEND", "frontend/dist"))
 TICK_S = 0.5
 LOOP_ERROR_REPEAT_S = 600
 
@@ -176,6 +177,7 @@ def main() -> None:
         reload_references=llm.reload_references,
         reference_dir=DATA_DIR / "reference",
         training_dir=DATA_DIR / "training",
+        frontend_dist=FRONTEND_DIST,
     )
     try:
         uvicorn.run(

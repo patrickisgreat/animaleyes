@@ -1,3 +1,12 @@
+# --- stage 1: build the React dashboard -------------------------------------------------
+FROM node:20-alpine AS frontend
+WORKDIR /fe
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build        # -> /fe/dist
+
+# --- stage 2: the app --------------------------------------------------------------------
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
@@ -20,7 +29,9 @@ RUN if [ "$WITH_YOLO" = "1" ]; then \
 
 COPY tools ./tools
 COPY config.toml ./config.toml.default
+COPY --from=frontend /fe/dist ./frontend_dist
 
 # config.toml, the SQLite database and saved frames live on volumes (see docker-compose.yml).
-ENV ANIMALEYES_CONFIG=/app/config/config.toml ANIMALEYES_DATA=/app/data
+ENV ANIMALEYES_CONFIG=/app/config/config.toml ANIMALEYES_DATA=/app/data \
+    ANIMALEYES_FRONTEND=/app/frontend_dist
 CMD ["sh", "-c", "mkdir -p /app/config && [ -f $ANIMALEYES_CONFIG ] || cp config.toml.default $ANIMALEYES_CONFIG; exec animaleyes"]
