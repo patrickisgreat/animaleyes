@@ -56,20 +56,33 @@ class UnavailableFeeder:
         raise FeederError(self.error)
 
 
+def _yolo(config: ConfigStore):
+    from .yolo import YoloConfig, YoloIdentifier
+
+    s = config.load()
+    return YoloIdentifier(
+        s.YOLO_MODEL,
+        YoloConfig(min_conf=s.YOLO_MIN_CONF, grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION),
+    )
+
+
+def _claude(config: ConfigStore, store: Store):
+    return ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+
+
 def build_identifier(name: str, config: ConfigStore, store: Store):
     """Select the detector backend by config. Backends share the Identifier interface, so the
     state machine is unchanged whichever is chosen."""
     if name == "yolo":
-        from .yolo import YoloConfig, YoloIdentifier
+        log.info("identifier: YOLO (local only)")
+        return _yolo(config)
+    if name == "cascade":
+        from .cascade import CascadeIdentifier
 
-        s = config.load()
-        log.info("identifier: YOLO (%s)", s.YOLO_MODEL)
-        return YoloIdentifier(
-            s.YOLO_MODEL,
-            YoloConfig(min_conf=s.YOLO_MIN_CONF, grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION),
-        )
+        log.info("identifier: cascade (YOLO gate → Claude confirm)")
+        return CascadeIdentifier(gate=_yolo(config), confirm=_claude(config, store))
     log.info("identifier: Claude (%s)", config.load().LLM_MODEL)
-    return ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+    return _claude(config, store)
 
 
 def build(

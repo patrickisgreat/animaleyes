@@ -79,6 +79,19 @@ def create_app(
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
     ANIMALS = ("grrr", "bowie", "cat")
 
+    def ref_counts() -> dict[str, int]:
+        # Count the photos actually on disk, independent of the active detector (YOLO doesn't
+        # track reference images, so reading them off the identifier wrongly showed 0).
+        counts: dict[str, int] = {}
+        for a in ANIMALS:
+            d = (reference_dir / a) if reference_dir else None
+            counts[a] = (
+                sum(1 for p in d.glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
+                if d and d.is_dir()
+                else 0
+            )
+        return counts
+
     def _basic_ok(credentials: Credentials) -> bool:
         return (
             bool(secrets.dash_password)
@@ -180,11 +193,12 @@ def create_app(
             "llm_calls_today": calls,
             "llm_cost_today_usd": round(cost, 4),
             "llm_model": settings.LLM_MODEL,
+            "identifier": settings.IDENTIFIER,
             "last_verdict": verdict,
             "last_llm_at": machine.last_llm_at.isoformat(timespec="seconds")
             if machine.last_llm_at
             else None,
-            "reference_counts": getattr(machine.llm, "reference_counts", {}),
+            "reference_counts": ref_counts(),
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
         }
 
@@ -241,7 +255,7 @@ def create_app(
         (_animal_dir(animal) / safe).write_bytes(jpeg)
         if reload_references:
             reload_references()
-        return {"saved": safe, "reference_counts": getattr(machine.llm, "reference_counts", {})}
+        return {"saved": safe, "reference_counts": ref_counts()}
 
     @app.post("/api/reference/{animal}", dependencies=guarded)
     async def upload_reference(animal: str, request: Request) -> dict[str, Any]:
@@ -264,7 +278,7 @@ def create_app(
     def reload_refs() -> dict[str, Any]:
         if reload_references:
             reload_references()
-        return {"reference_counts": getattr(machine.llm, "reference_counts", {})}
+        return {"reference_counts": ref_counts()}
 
     @app.get("/frame.jpg", dependencies=guarded)
     def frame() -> Response:
@@ -432,7 +446,9 @@ PAGE = """<!doctype html>
  .chip .pn{opacity:.7;font-size:12px}
  .hint{color:var(--muted);font-size:12px;margin-top:10px}
  /* events */
- .evlist{display:flex;flex-direction:column}
+ .evlist{display:flex;flex-direction:column;max-height:460px;overflow-y:auto;
+   margin:-4px -4px 0;padding:0 4px}
+ .evlist::-webkit-scrollbar{width:8px}.evlist::-webkit-scrollbar-thumb{background:var(--border);border-radius:8px}
  .ev{display:flex;gap:11px;padding:10px 0;border-bottom:1px solid var(--border);align-items:flex-start}
  .ev:last-child{border-bottom:0}
  .ev .ico{width:26px;height:26px;border-radius:7px;flex:none;display:grid;place-items:center;
@@ -575,9 +591,10 @@ const CONTROLS = [
   ["ACTIVE_START","Active from","text","Schedule"],
   ["ACTIVE_END","Active until","text","Schedule"],
   ["DRY_RUN","Dry run (don't move feeder)","bool","Schedule"],
-  ["IDENTIFIER","Detector","select:claude,yolo","Identification"],
+  ["IDENTIFIER","Detector","select:cascade,yolo,claude","Identification"],
   ["GRRR_MIN_CONF","Min confidence for Grrr","number","Identification"],
   ["CONFIRMATIONS_REQUIRED","Confirmations before feeding","number","Identification"],
+  ["OPEN_REQUIRES_AT_BOWL","Require head-in-bowl to open","bool","Identification"],
   ["GRRR_MAX_BOX_FRACTION","YOLO: max size that's Grrr","number","Identification"],
   ["YOLO_MIN_CONF","YOLO: min detection confidence","number","Identification"],
   ["LLM_MODEL","Claude model","text","Identification"],
@@ -655,6 +672,7 @@ async function refresh() {
     ["Loaded plates", (s.loaded_plates&&s.loaded_plates.length) ? s.loaded_plates.join(", ") : "none"],
     ["Camera", s.camera_age_s==null ? "no frames" : fmtAge(s.camera_age_s)],
     ["Motion", motion],
+    ["Detector", {cascade:"Cascade (local + Claude)",yolo:"YOLO (local)",claude:"Claude"}[s.identifier]||s.identifier||"—"],
     ["Checks today", s.llm_calls_today + (s.llm_cost_today_usd ? " · $"+s.llm_cost_today_usd.toFixed(2) : "")],
     ["Heartbeat", fmtAge(s.heartbeat_age_s)],
   ].filter(t => t[1] !== "");

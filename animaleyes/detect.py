@@ -44,11 +44,11 @@ class Verdict:
             "reason": self.reason,
         }
 
-    def is_grrr(self, min_confidence: float) -> bool:
+    def is_grrr(self, min_confidence: float, require_at_bowl: bool = True) -> bool:
         return (
             self.animal == "grrr"
             and self.confidence >= min_confidence
-            and self.at_bowl
+            and (self.at_bowl or not require_at_bowl)
             and not self.other_animals_present
         )
 

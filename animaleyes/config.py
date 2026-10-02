@@ -30,7 +30,7 @@ class Settings:
     FEEDING_MAX_MIN: int = 15
     FEEDING_POLL_S: int = 20
     CONFIRMATIONS_REQUIRED: int = 3
-    GRRR_MIN_CONF: float = 0.8
+    GRRR_MIN_CONF: float = 0.65  # Grrr reads ~0.72-0.9 in IR; 0.8 was a touch high
     MOTION_PIXEL_FRACTION: float = 0.02
     MOTION_HOLD_S: int = 20
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
@@ -42,10 +42,16 @@ class Settings:
     LLM_MIN_INTERVAL_S: int = 3
     HEARTBEAT_MIN: int = 5
     LLM_MODEL: str = "claude-opus-5"
-    IDENTIFIER: str = "claude"  # "claude" (cloud LLM) | "yolo" (local, free)
+    # "cascade" = local YOLO gate (dog/cat/none, free) that only escalates to Claude when a
+    # dog is present (accurate + cheap); "claude" = always Claude; "yolo" = local only.
+    IDENTIFIER: str = "cascade"
     YOLO_MODEL: str = "yolo11n.pt"  # pretrained COCO; dog/cat/person
-    YOLO_MIN_CONF: float = 0.4
-    GRRR_MAX_BOX_FRACTION: float = 0.18  # a dog box this fraction of frame or smaller = Grrr
+    YOLO_MIN_CONF: float = 0.45
+    GRRR_MAX_BOX_FRACTION: float = 0.5  # YOLO-only mode: dog box this fraction or smaller = Grrr
+    # The open decision needs Grrr confirmed at the bowl. The bowl is closed/empty before a
+    # feed, so she hovers near it rather than head-in-bowl; requiring at_bowl blocks nearly
+    # every feed, so default off (presence is enough; identity still has to be Grrr).
+    OPEN_REQUIRES_AT_BOWL: bool = False
 
     def active_window(self) -> tuple[time, time]:
         return parse_hhmm(self.ACTIVE_START), parse_hhmm(self.ACTIVE_END)

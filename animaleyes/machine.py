@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from .camera import FrameBuffer
+from .camera import Frame, FrameBuffer
 from .config import ConfigStore, Settings
 from .feeder import Feeder, FeederError
 from .motion import MotionDetector
@@ -77,6 +77,7 @@ class Machine:
         self.dashboard_url = dashboard_url
         self.verdicts: deque[Verdict] = deque(maxlen=VERDICT_HISTORY)
         self.last_verdict: Verdict | FeedingVerdict | None = None
+        self.judged_frames: list[Frame] = []
         self.last_llm_at: datetime | None = None
         self.last_feeding_verdict: FeedingVerdict | None = None
         self.last_heartbeat_at: datetime | None = None
@@ -174,7 +175,8 @@ class Machine:
             return
         if not self._llm_due(now, self.settings.LLM_MIN_INTERVAL_S):
             return
-        verdict = self.llm.identify(self.frames.latest(3))
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.identify(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
         self.verdicts.append(verdict)
@@ -246,7 +248,8 @@ class Machine:
             return
         if not self._llm_due(now, self.settings.FEEDING_POLL_S):
             return
-        verdict = self.llm.feeding_check(self.frames.latest(3))
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.feeding_check(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
         self.last_feeding_verdict = verdict
@@ -322,7 +325,8 @@ class Machine:
         if self.done_motion_seen:
             return
         self.done_motion_seen = True
-        verdict = self.llm.identify(self.frames.latest(3))
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.identify(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
         if verdict.animal == "grrr":
@@ -356,7 +360,10 @@ class Machine:
     def _grrr_confirmed(self) -> bool:
         needed = self.settings.CONFIRMATIONS_REQUIRED
         recent = list(self.verdicts)[-needed:]
-        return len(recent) >= needed and all(v.is_grrr(self.settings.GRRR_MIN_CONF) for v in recent)
+        require_bowl = self.settings.OPEN_REQUIRES_AT_BOWL
+        return len(recent) >= needed and all(
+            v.is_grrr(self.settings.GRRR_MIN_CONF, require_bowl) for v in recent
+        )
 
     def _open_blocker(self, now: datetime) -> str | None:
         if not self.store.loaded_plates():
@@ -417,8 +424,12 @@ class Machine:
         if notify:
             self._notify(f"{kind}: {reason}", event_id)
 
-    def _save_frames(self, tag: str) -> list[str]:
-        frames = self.frames.latest(3)
+    def _save_frames(self, tag: str, frames: list[Frame] | None = None) -> list[str]:
+        # Default to the exact frames the detector just judged (self.judged_frames) so an
+        # event's images show what the decision was actually made on — the LLM call takes a
+        # second or two, during which a passing cat can leave frame, so grabbing fresh frames
+        # here would save an empty scene. Falls back to the latest frames when none were judged.
+        frames = frames if frames is not None else (self.judged_frames or self.frames.latest(3))
         names: list[str] = []
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         for i, frame in enumerate(frames):
