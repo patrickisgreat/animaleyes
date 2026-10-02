@@ -46,3 +46,38 @@ def test_is_grrr_can_skip_the_at_bowl_requirement():
     v = Verdict(animal="grrr", confidence=0.7, at_bowl=False)
     assert v.is_grrr(0.65, require_at_bowl=True) is False
     assert v.is_grrr(0.65, require_at_bowl=False) is True
+
+
+def test_cascade_saves_confident_dog_as_training_frame(tmp_path):
+    from datetime import datetime
+
+    from animaleyes.camera import Frame
+    from animaleyes.config import ConfigStore
+
+    cfg = ConfigStore(tmp_path / "c.toml")  # defaults: COLLECT_TRAINING=True, min_conf=0.6
+    tdir = tmp_path / "training"
+    c = CascadeIdentifier(
+        _Fake(Verdict(animal="grrr", confidence=0.9)),  # YOLO: a dog
+        _Fake(Verdict(animal="grrr", confidence=0.86)),  # Claude: Grrr
+        config=cfg,
+        training_dir=tdir,
+    )
+    c.identify([Frame(jpeg=b"\xff\xd8x\xff\xd9", at=datetime(2026, 10, 2, 21, 0, 0))])
+    assert len(list((tdir / "grrr").glob("*.jpg"))) == 1
+
+
+def test_cascade_does_not_save_low_confidence(tmp_path):
+    from datetime import datetime
+
+    from animaleyes.camera import Frame
+    from animaleyes.config import ConfigStore
+
+    tdir = tmp_path / "training"
+    c = CascadeIdentifier(
+        _Fake(Verdict(animal="bowie", confidence=0.9)),
+        _Fake(Verdict(animal="grrr", confidence=0.4)),  # below TRAINING_MIN_CONF
+        config=ConfigStore(tmp_path / "c.toml"),
+        training_dir=tdir,
+    )
+    c.identify([Frame(jpeg=b"\xff\xd8x\xff\xd9", at=datetime(2026, 10, 2, 21, 0, 0))])
+    assert not (tdir / "grrr").exists() or not list((tdir / "grrr").glob("*.jpg"))

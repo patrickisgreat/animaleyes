@@ -80,7 +80,12 @@ def build_identifier(name: str, config: ConfigStore, store: Store):
         from .cascade import CascadeIdentifier
 
         log.info("identifier: cascade (YOLO gate → Claude confirm)")
-        return CascadeIdentifier(gate=_yolo(config), confirm=_claude(config, store))
+        return CascadeIdentifier(
+            gate=_yolo(config),
+            confirm=_claude(config, store),
+            config=config,
+            training_dir=DATA_DIR / "training",
+        )
     log.info("identifier: Claude (%s)", config.load().LLM_MODEL)
     return _claude(config, store)
 
@@ -161,6 +166,7 @@ def main() -> None:
         DATA_DIR / "frames",
         reload_references=llm.reload_references,
         reference_dir=DATA_DIR / "reference",
+        training_dir=DATA_DIR / "training",
     )
     try:
         uvicorn.run(

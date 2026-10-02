@@ -75,9 +75,29 @@ def create_app(
     frames_dir: Path,
     reload_references=None,
     reference_dir: Path | None = None,
+    training_dir: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
     ANIMALS = ("grrr", "bowie", "cat")
+    PHOTO_SETS = {"reference": reference_dir, "training": training_dir}
+    IMG_EXT = (".jpg", ".jpeg", ".png")
+
+    def photo_dir(set_name: str, animal: str, create: bool = False) -> Path:
+        base = PHOTO_SETS.get(set_name)
+        if base is None or animal not in ANIMALS:
+            raise HTTPException(status_code=404, detail="unknown photo set or animal")
+        d = base / animal
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def list_photos(set_name: str, animal: str) -> list[str]:
+        d = PHOTO_SETS.get(set_name)
+        d = (d / animal) if d else None
+        if not d or not d.is_dir():
+            return []
+        files = [p for p in d.iterdir() if p.suffix.lower() in IMG_EXT]
+        return [p.name for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)]
 
     def ref_counts() -> dict[str, int]:
         # Count the photos actually on disk, independent of the active detector (YOLO doesn't
@@ -199,6 +219,7 @@ def create_app(
             if machine.last_llm_at
             else None,
             "reference_counts": ref_counts(),
+            "training_counts": {a: len(list_photos("training", a)) for a in ANIMALS},
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
         }
 
@@ -279,6 +300,43 @@ def create_app(
         if reload_references:
             reload_references()
         return {"reference_counts": ref_counts()}
+
+    # --- photo management (reference + auto-collected training frames) ---------------
+    @app.get("/api/photos/{set_name}/{animal}", dependencies=guarded)
+    def photos_list(set_name: str, animal: str, limit: int = 60) -> dict[str, Any]:
+        photo_dir(set_name, animal)  # validates set + animal (404 otherwise)
+        names = list_photos(set_name, animal)
+        return {"total": len(names), "files": names[:limit]}
+
+    @app.get("/photos/{set_name}/{animal}/{name}", dependencies=guarded)
+    def photo_file(set_name: str, animal: str, name: str) -> FileResponse:
+        d = photo_dir(set_name, animal)
+        path = (d / Path(name).name).resolve()
+        if not path.is_file() or d.resolve() not in path.parents:
+            raise HTTPException(status_code=404)
+        return FileResponse(path)
+
+    @app.delete("/api/photos/{set_name}/{animal}/{name}", dependencies=guarded)
+    def photo_delete(set_name: str, animal: str, name: str) -> dict[str, bool]:
+        d = photo_dir(set_name, animal)
+        path = (d / Path(name).name).resolve()
+        if path.is_file() and d.resolve() in path.parents:
+            path.unlink()
+        if set_name == "reference" and reload_references:
+            reload_references()
+        return {"ok": True}
+
+    @app.post("/api/photos/{set_name}/{animal}/{name}/retag", dependencies=guarded)
+    def photo_retag(set_name: str, animal: str, name: str, to: str) -> dict[str, bool]:
+        src_dir = photo_dir(set_name, animal)
+        src = (src_dir / Path(name).name).resolve()
+        if not src.is_file() or src_dir.resolve() not in src.parents:
+            raise HTTPException(status_code=404)
+        dst = photo_dir(set_name, to, create=True) / src.name
+        src.rename(dst)
+        if set_name == "reference" and reload_references:
+            reload_references()
+        return {"ok": True}
 
     @app.get("/frame.jpg", dependencies=guarded)
     def frame() -> Response:
@@ -464,6 +522,15 @@ PAGE = """<!doctype html>
  .ref .name{font-weight:700;text-transform:capitalize}
  .ref .cnt{color:var(--muted);font-size:12px;margin:2px 0 8px}
  .ref input[type=file]{font-size:12px;width:100%;color:var(--muted)}
+ .galgrp{margin-bottom:14px}
+ .galhead{font-weight:700;text-transform:capitalize;margin-bottom:8px;display:flex;gap:8px;align-items:baseline}
+ .thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px}
+ .thumb{position:relative;border-radius:8px;overflow:hidden;border:1px solid var(--border);aspect-ratio:1;background:#000}
+ .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+ .thumbbar{position:absolute;left:0;right:0;bottom:0;display:flex;gap:3px;padding:4px;background:rgba(8,10,14,.78);justify-content:center}
+ @media(hover:hover){.thumbbar{opacity:0;transition:.12s}.thumb:hover .thumbbar{opacity:1}}
+ .tb{font-size:10px;font-weight:700;padding:4px 6px;min-height:auto;border-radius:6px;line-height:1}
+ .tb.del{color:var(--bad);border-color:rgba(255,92,102,.35)}
  details{border-top:1px solid var(--border);margin-top:4px}
  details summary{cursor:pointer;padding:12px 0 4px;font-size:12px;font-weight:700;
    text-transform:uppercase;letter-spacing:.08em;color:var(--muted);list-style:none}
@@ -549,6 +616,14 @@ PAGE = """<!doctype html>
     <div class="refgrid" id="refs"></div>
     <div class="btnrow"><button class="sm" onclick="reloadRefs()">Reload photos</button></div>
     <div class="hint">What the detector learns each animal from. At night the camera is infra‑red, so a black coat is invisible — “Grab frame” captures real IR shots to teach it size and shape.</div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <details id="trainCard">
+      <summary>Training data — review &amp; tag frames</summary>
+      <div class="hint" style="margin:6px 0 12px">Frames the detector auto-saved when Claude confirmed a dog, pre-labelled. Cull the bad ones, and fix any wrong label (re-tag) — this becomes the dataset for a local Grrr-vs-Bowie model, so Claude can be dropped. Opens to load.</div>
+      <div id="gallery"></div>
+    </details>
   </div>
 
   <div class="card" style="margin-top:16px">
@@ -719,6 +794,27 @@ async function grabRef(a){
 }
 async function reloadRefs(){ await fetch("/api/reload-references",{method:"POST"}); toast("Reloaded reference photos"); refresh(); }
 
+async function loadGallery(){
+  const wrap = document.getElementById("gallery"); let html = "";
+  for (const a of ANIMALS){
+    const r = await (await fetch(`/api/photos/training/${a}?limit=60`)).json();
+    html += `<div class="galgrp"><div class="galhead">${NAMES[a]||a} <span class="muted">${r.total} frame${r.total==1?"":"s"}${r.total>r.files.length?` (newest ${r.files.length})`:""}</span></div><div class="thumbs">`;
+    html += r.files.map(n => thumbHtml("training", a, n)).join("") || '<div class="hint">none yet — collected automatically when Grrr or Bowie is confirmed</div>';
+    html += `</div></div>`;
+  }
+  wrap.innerHTML = html;
+}
+function thumbHtml(set, a, n){
+  const others = ANIMALS.filter(x => x !== a);
+  const en = encodeURIComponent(n);
+  return `<div class="thumb"><img loading="lazy" src="/photos/${set}/${a}/${en}">`+
+    `<div class="thumbbar"><button class="tb del" title="delete" onclick="photoDel('${set}','${a}','${en}')">✕</button>`+
+    others.map(o => `<button class="tb" title="re-tag as ${NAMES[o]||o}" onclick="photoRetag('${set}','${a}','${en}','${o}')">${(NAMES[o]||o)[0]}</button>`).join("")+
+    `</div></div>`;
+}
+async function photoDel(set,a,n){ await fetch(`/api/photos/${set}/${a}/${n}`,{method:"DELETE"}); toast("Deleted"); loadGallery(); }
+async function photoRetag(set,a,n,to){ await fetch(`/api/photos/${set}/${a}/${n}/retag?to=${to}`,{method:"POST"}); toast("Re-tagged as "+(NAMES[to]||to)); loadGallery(); }
+
 async function feeder(action){
   if (!confirm(action[0].toUpperCase()+action.slice(1)+" the feeder now?")) return;
   await fetch("/api/feeder/"+action,{method:"POST"});
@@ -783,6 +879,8 @@ function toggleLive(){
 }
 document.getElementById("live").onerror = () => { if (live) setTimeout(startLive, 3000); };
 document.addEventListener("visibilitychange", () => { if (live && !document.hidden) startLive(); });
+// Load the training gallery lazily when the section is first opened (it can be many images).
+document.getElementById("trainCard").addEventListener("toggle", function(){ if (this.open) loadGallery(); });
 startLive(); refresh(); loadConfig(); loadEvents();
 setInterval(refresh, 1500); setInterval(loadEvents, 15000);
 </script></body></html>

@@ -52,6 +52,11 @@ class Settings:
     # feed, so she hovers near it rather than head-in-bowl; requiring at_bowl blocks nearly
     # every feed, so default off (presence is enough; identity still has to be Grrr).
     OPEN_REQUIRES_AT_BOWL: bool = False
+    # Auto-collect labelled IR crops for a future local classifier: when the cascade's Claude
+    # step confidently says Grrr/Bowie, save that frame under data/training/<animal>/.
+    COLLECT_TRAINING: bool = True
+    TRAINING_MIN_CONF: float = 0.6
+    TRAINING_MIN_GAP_S: int = 5  # don't save more than one crop this often (avoid bursts)
 
     def active_window(self) -> tuple[time, time]:
         return parse_hhmm(self.ACTIVE_START), parse_hhmm(self.ACTIVE_END)

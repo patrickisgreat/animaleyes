@@ -34,6 +34,7 @@ def client(h: Harness) -> TestClient:
         secrets,
         h.tmp_path / "frames",
         reference_dir=h.tmp_path / "reference",
+        training_dir=h.tmp_path / "training",
     )
     c = TestClient(app)
     c.auth = ("me", PASSWORD)
@@ -214,3 +215,23 @@ def test_healthz_fails_when_loop_is_stale(h: Harness) -> None:
     assert c.get("/healthz", auth=None).status_code == 200  # fresh
     h.clock.advance(minutes=30)
     assert c.get("/healthz", auth=None).status_code == 503  # loop stale → unhealthy → autoheal
+
+
+def test_photo_list_serve_retag_delete(h: Harness) -> None:
+    c = client(h)
+    d = h.tmp_path / "training" / "grrr"
+    d.mkdir(parents=True)
+    (d / "a.jpg").write_bytes(b"\xff\xd8pic\xff\xd9")
+    assert c.get("/api/photos/training/grrr").json()["total"] == 1
+    assert c.get("/photos/training/grrr/a.jpg").status_code == 200
+    # re-tag grrr -> bowie moves the file
+    assert (
+        c.post("/api/photos/training/grrr/a.jpg/retag", params={"to": "bowie"}).status_code == 200
+    )
+    assert not (d / "a.jpg").exists()
+    assert (h.tmp_path / "training" / "bowie" / "a.jpg").exists()
+    # delete it
+    assert c.request("DELETE", "/api/photos/training/bowie/a.jpg").status_code == 200
+    assert c.get("/api/photos/training/bowie").json()["total"] == 0
+    # unknown set/animal is rejected
+    assert c.get("/api/photos/training/dragon").status_code == 404
