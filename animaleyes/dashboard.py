@@ -80,6 +80,7 @@ def create_app(
     reference_dir: Path | None = None,
     training_dir: Path | None = None,
     personas=None,
+    themes=None,
     frontend_dist: Path | None = None,
     ptz=None,
 ) -> FastAPI:
@@ -442,6 +443,32 @@ def create_app(
             reload_references()
         store.add_event(machine.clock(), "persona", f"saved {persona.name}", persona.to_dict())
         return persona.to_dict()
+
+    # --- custom colour themes (presentation only) -------------------------------------
+    @app.get("/api/themes", dependencies=guarded)
+    def themes_list() -> list[dict[str, Any]]:
+        return [t.to_dict() for t in themes.load()] if themes is not None else []
+
+    @app.post("/api/themes", dependencies=guarded)
+    async def themes_upsert(request: Request) -> dict[str, Any]:
+        if themes is None:
+            raise HTTPException(status_code=503, detail="themes unavailable")
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        try:
+            theme = themes.upsert(name, body.get("colors", {}), body.get("id"))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"no such theme {exc}") from exc
+        return theme.to_dict()
+
+    @app.delete("/api/themes/{theme_id}", dependencies=guarded)
+    def themes_delete(theme_id: str) -> dict[str, bool]:
+        if themes is None:
+            raise HTTPException(status_code=503, detail="themes unavailable")
+        themes.delete(theme_id)
+        return {"ok": True}
 
     @app.delete("/api/personas/{key}", dependencies=guarded)
     def personas_delete(key: str) -> dict[str, bool]:

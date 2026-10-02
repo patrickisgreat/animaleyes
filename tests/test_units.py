@@ -329,3 +329,26 @@ def test_persona_store_crud_and_feed_invariant(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         store.delete("grrr")
+
+
+def test_theme_store_crud_and_validation(tmp_path) -> None:
+    from animaleyes.themes import ThemeStore
+
+    store = ThemeStore(tmp_path / "themes.json")
+    assert store.load() == []  # no custom themes to start
+
+    # Create: unknown tokens and bad hex values are dropped; a short id is assigned.
+    t = store.upsert("Midnight", {"bg": "#0d0a1a", "teal": "nothex", "bogus": "#ffffff"})
+    assert t.id and t.name == "Midnight"
+    assert t.colors == {"bg": "#0d0a1a"}  # teal (bad hex) and bogus (unknown) dropped
+
+    # Edit by id.
+    store.upsert("Midnight 2", {"bg": "#010203", "teal": "#112233"}, theme_id=t.id)
+    reloaded = store.load()
+    assert len(reloaded) == 1
+    assert reloaded[0].name == "Midnight 2"
+    assert reloaded[0].colors == {"bg": "#010203", "teal": "#112233"}
+
+    # Delete.
+    store.delete(t.id)
+    assert store.load() == []

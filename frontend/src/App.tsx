@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { api, usePoll } from "./lib/api";
 import type { Status } from "./lib/api";
+import type { ThemeDef } from "./lib/theme";
 import { Badge, ThemeToggle } from "./lib/ui";
+import { Themes } from "./panels/Themes";
 import { LiveView, StateBanner } from "./panels/LiveState";
 import { CameraPtz } from "./panels/CameraPtz";
 import { Feeder, Plates } from "./panels/Feeder";
@@ -12,6 +15,10 @@ import { Settings } from "./panels/Settings";
 
 export function App() {
   const [s, refresh] = usePoll<Status>(() => api.status(), 1500);
+  const [themes, setThemes] = useState<ThemeDef[]>([]);
+  const reloadThemes = () =>
+    fetch("/api/themes").then((r) => r.json()).then(setThemes).catch(() => {});
+  useEffect(() => { reloadThemes(); }, []);
 
   return (
     <div className="max-w-[1080px] mx-auto p-4">
@@ -23,7 +30,7 @@ export function App() {
         {s && <Badge tone={s.dry_run ? "pearl" : "teal"}>{s.dry_run ? "Dry run" : "Live"}</Badge>}
         {s && <Badge tone={s.camera_offline ? "bad" : "teal"}>{s.camera_offline ? "Camera offline" : "Camera ok"}</Badge>}
         {s?.capture_mode && <Badge tone="sage">📸 Capturing</Badge>}
-        <ThemeToggle />
+        <ThemeToggle custom={themes} />
       </header>
 
       <div className="grid gap-4 md:[grid-template-columns:1.25fr_1fr] md:items-start">
@@ -44,6 +51,7 @@ export function App() {
         <Personas personas={s?.personas || []} refresh={refresh} />
         <ReferencePhotos personas={s?.personas || []} counts={s?.reference_counts || {}} refresh={refresh} />
         <TrainingGallery personas={s?.personas || []} counts={s?.training_counts || {}} captureMode={s?.capture_mode} />
+        <Themes themes={themes} refresh={reloadThemes} />
         <Settings />
       </div>
     </div>

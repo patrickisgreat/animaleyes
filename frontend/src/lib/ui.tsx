@@ -1,5 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { BUILTINS, activeThemeId, applyTheme } from "./theme";
+import type { ThemeDef } from "./theme";
 
 // ---- Toasts -------------------------------------------------------------
 type Toast = { id: number; msg: string; err?: boolean };
@@ -135,28 +137,36 @@ export function Tile({ label, value, i = 0 }: { label: string; value: ReactNode;
 }
 
 // ---- Theme switcher -----------------------------------------------------
-const THEMES: { id: string; css: string }[] = [
-  { id: "sage", css: "linear-gradient(135deg,#93c0a4,#dce2bd)" },
-  { id: "aurora", css: "linear-gradient(135deg,#7400b8,#80ffdb)" },
-];
-export function ThemeToggle() {
-  const [theme, setTheme] = useState<string>(
-    () => document.documentElement.dataset.theme || "sage",
-  );
-  const pick = (t: string) => {
-    document.documentElement.dataset.theme = t;
-    try { localStorage.setItem("theme", t); } catch { /* ignore */ }
-    setTheme(t);
-  };
+export function ThemeToggle({ custom = [] }: { custom?: ThemeDef[] }) {
+  const [active, setActive] = useState<string>(activeThemeId);
+  // Re-apply a saved custom theme once its definition arrives (and after edits).
+  useEffect(() => {
+    const def = custom.find((t) => t.id === active);
+    if (def) applyTheme(def.id, def);
+  }, [custom, active]);
+
+  const pick = (id: string, def?: ThemeDef) => { applyTheme(id, def); setActive(id); };
+  const swatch = (c?: Record<string, string>) =>
+    c ? `linear-gradient(135deg,${c.title1 || c.teal || "#888"},${c.title2 || c.beige || "#ccc"})` : "#888";
+
   return (
-    <div className="flex gap-1.5">
-      {THEMES.map((t) => (
+    <div className="flex gap-1.5 flex-wrap">
+      {BUILTINS.map((t) => (
         <button
           key={t.id}
-          title={t.id}
+          title={t.name}
           onClick={() => pick(t.id)}
-          style={{ background: t.css }}
-          className={`w-6 h-6 rounded-full border-2 transition ${theme === t.id ? "border-ink scale-110" : "border-edge"}`}
+          style={{ background: t.swatch }}
+          className={`w-6 h-6 rounded-full border-2 transition ${active === t.id ? "border-ink scale-110" : "border-edge"}`}
+        />
+      ))}
+      {custom.map((t) => (
+        <button
+          key={t.id}
+          title={t.name}
+          onClick={() => pick(t.id, t)}
+          style={{ background: swatch(t.colors) }}
+          className={`w-6 h-6 rounded-full border-2 transition ${active === t.id ? "border-ink scale-110" : "border-edge"}`}
         />
       ))}
     </div>

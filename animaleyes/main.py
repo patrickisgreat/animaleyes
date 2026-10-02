@@ -27,6 +27,7 @@ from .notify import SlackNotifier
 from .personas import PersonaStore
 from .ptz import Ptz
 from .store import Store
+from .themes import ThemeStore
 from .vision import ClaudeIdentifier
 
 log = logging.getLogger("animaleyes")
@@ -205,6 +206,7 @@ def main() -> None:
         reference_dir=DATA_DIR / "reference",
         training_dir=DATA_DIR / "training",
         personas=personas,
+        themes=ThemeStore(DATA_DIR / "themes.json"),
         frontend_dist=FRONTEND_DIST,
         ptz=Ptz(secrets.kasa_stream_url, secrets.kasa_camera_mac)
         if secrets.kasa_stream_url
