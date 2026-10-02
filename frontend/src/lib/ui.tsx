@@ -77,3 +77,32 @@ export function Tile({ label, value, i = 0 }: { label: string; value: ReactNode;
     </div>
   );
 }
+
+// ---- Theme switcher -----------------------------------------------------
+const THEMES: { id: string; css: string }[] = [
+  { id: "sage", css: "linear-gradient(135deg,#93c0a4,#dce2bd)" },
+  { id: "aurora", css: "linear-gradient(135deg,#7400b8,#80ffdb)" },
+];
+export function ThemeToggle() {
+  const [theme, setTheme] = useState<string>(
+    () => document.documentElement.dataset.theme || "sage",
+  );
+  const pick = (t: string) => {
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem("theme", t); } catch { /* ignore */ }
+    setTheme(t);
+  };
+  return (
+    <div className="flex gap-1.5">
+      {THEMES.map((t) => (
+        <button
+          key={t.id}
+          title={t.id}
+          onClick={() => pick(t.id)}
+          style={{ background: t.css }}
+          className={`w-6 h-6 rounded-full border-2 transition ${theme === t.id ? "border-ink scale-110" : "border-edge"}`}
+        />
+      ))}
+    </div>
+  );
+}
