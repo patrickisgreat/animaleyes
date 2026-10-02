@@ -39,6 +39,8 @@ class Settings:
     # Dashboard auth: "tailscale" = trust any device on the tailnet (no password), basic-auth
     # fallback off-tailnet; "basic" = always require the password; "none" = open (don't).
     DASH_AUTH: str = "tailscale"
+    PTZ_SPEED: float = 0.4  # pan/tilt velocity 0..1 for a nudge
+    PTZ_STEP_MS: int = 500  # how long one tap moves the camera
     LLM_MIN_INTERVAL_S: int = 3
     HEARTBEAT_MIN: int = 5
     LLM_MODEL: str = "claude-opus-5"

@@ -33,6 +33,7 @@ export type Status = {
   llm_cost_today_usd: number;
   llm_model: string;
   identifier: string;
+  ptz_available: boolean;
   last_verdict: Verdict | null;
   last_llm_at: string | null;
   reference_counts: Record<string, number>;

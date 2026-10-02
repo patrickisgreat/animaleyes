@@ -78,6 +78,7 @@ def create_app(
     reference_dir: Path | None = None,
     training_dir: Path | None = None,
     frontend_dist: Path | None = None,
+    ptz=None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
     ANIMALS = ("grrr", "bowie", "cat")
@@ -221,6 +222,7 @@ def create_app(
             "llm_cost_today_usd": round(cost, 4),
             "llm_model": settings.LLM_MODEL,
             "identifier": settings.IDENTIFIER,
+            "ptz_available": ptz is not None,
             "last_verdict": verdict,
             "last_llm_at": machine.last_llm_at.isoformat(timespec="seconds")
             if machine.last_llm_at
@@ -253,6 +255,56 @@ def create_app(
             store.set_plate(plate, "loaded" if plate in loaded else "empty", now)
         store.set("plates_updated", 1)
         return {"plates": store.plates()}
+
+    # --- camera pan/tilt (PTZ over ONVIF; moves the camera, not the feeder) ----------
+    PTZ_DIRS = {"up": (0.0, 1.0), "down": (0.0, -1.0), "left": (-1.0, 0.0), "right": (1.0, 0.0)}
+
+    @app.post("/api/ptz/nudge", dependencies=guarded)
+    def ptz_nudge(dir: str) -> dict[str, str]:
+        if ptz is None:
+            raise HTTPException(status_code=503, detail="no camera")
+        if dir not in PTZ_DIRS:
+            raise HTTPException(status_code=400, detail="bad direction")
+        s = machine.settings
+        dx, dy = PTZ_DIRS[dir]
+        try:
+            ptz.nudge(dx * s.PTZ_SPEED, dy * s.PTZ_SPEED, s.PTZ_STEP_MS)
+        except Exception as exc:  # noqa: BLE001 - surface camera errors to the UI
+            raise HTTPException(status_code=502, detail=f"ptz failed: {exc}") from exc
+        return {"ok": dir}
+
+    @app.post("/api/ptz/stop", dependencies=guarded)
+    def ptz_stop() -> dict[str, bool]:
+        if ptz is not None:
+            try:
+                ptz.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        return {"ok": True}
+
+    @app.get("/api/ptz/presets", dependencies=guarded)
+    def ptz_presets() -> dict[str, Any]:
+        if ptz is None:
+            return {"presets": []}
+        try:
+            return {"presets": ptz.presets()}
+        except Exception:  # noqa: BLE001
+            return {"presets": []}
+
+    @app.post("/api/ptz/preset", dependencies=guarded)
+    async def ptz_set_preset(request: Request) -> dict[str, bool]:
+        if ptz is None:
+            raise HTTPException(status_code=503, detail="no camera")
+        name = (await request.json()).get("name", "preset")
+        ptz.set_preset(str(name)[:40])
+        return {"ok": True}
+
+    @app.post("/api/ptz/goto", dependencies=guarded)
+    def ptz_goto(token: str) -> dict[str, bool]:
+        if ptz is None:
+            raise HTTPException(status_code=503, detail="no camera")
+        ptz.goto(token)
+        return {"ok": True}
 
     @app.post("/api/feed-now", dependencies=guarded)
     def feed_now() -> dict[str, str]:

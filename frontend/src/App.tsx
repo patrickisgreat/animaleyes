@@ -2,6 +2,7 @@ import { api, usePoll } from "./lib/api";
 import type { Status } from "./lib/api";
 import { Badge, ThemeToggle } from "./lib/ui";
 import { LiveView, StateBanner } from "./panels/LiveState";
+import { CameraPtz } from "./panels/CameraPtz";
 import { Feeder, Plates } from "./panels/Feeder";
 import { StatusTiles } from "./panels/Status";
 import { Activity } from "./panels/Activity";
@@ -15,8 +16,8 @@ export function App() {
   return (
     <div className="max-w-[1080px] mx-auto p-4">
       <header className="flex items-center gap-3 flex-wrap mb-4">
-        <h1 className="text-[19px] font-black tracking-tight">
-          <span>🐾</span> <span className="brand">animaleyes</span>
+        <h1 className="text-[26px] font-black tracking-tight flex items-center gap-2">
+          <span>🐾</span> <span className="brand">animaleyes</span> <span>👁️</span>
         </h1>
         <span className="flex-1" />
         {s && <Badge tone={s.dry_run ? "pearl" : "teal"}>{s.dry_run ? "Dry run" : "Live"}</Badge>}
@@ -28,6 +29,7 @@ export function App() {
         <div className="grid gap-4 min-w-0">
           <StateBanner s={s} />
           <LiveView s={s} />
+          <CameraPtz s={s} />
           <Feeder s={s} refresh={refresh} />
           <Plates s={s} refresh={refresh} />
         </div>

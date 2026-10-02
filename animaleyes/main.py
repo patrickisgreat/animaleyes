@@ -24,6 +24,7 @@ from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
 from .notify import SlackNotifier
+from .ptz import Ptz
 from .store import Store
 from .vision import ClaudeIdentifier
 
@@ -178,6 +179,9 @@ def main() -> None:
         reference_dir=DATA_DIR / "reference",
         training_dir=DATA_DIR / "training",
         frontend_dist=FRONTEND_DIST,
+        ptz=Ptz(secrets.kasa_stream_url, secrets.kasa_camera_mac)
+        if secrets.kasa_stream_url
+        else None,
     )
     try:
         uvicorn.run(
