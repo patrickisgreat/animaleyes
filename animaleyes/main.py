@@ -67,7 +67,16 @@ def _yolo(config: ConfigStore):
 
 
 def _claude(config: ConfigStore, store: Store):
-    return ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+    def descriptions() -> dict[str, str]:
+        s = config.load()
+        return {"grrr": s.GRRR_DESC, "bowie": s.BOWIE_DESC, "cat": s.CAT_DESC}
+
+    return ClaudeIdentifier(
+        DATA_DIR / "reference",
+        store,
+        model=lambda: config.load().LLM_MODEL,
+        descriptions=descriptions,
+    )
 
 
 def build_identifier(name: str, config: ConfigStore, store: Store):

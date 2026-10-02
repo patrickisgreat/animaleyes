@@ -57,6 +57,20 @@ class Settings:
     COLLECT_TRAINING: bool = True
     TRAINING_MIN_CONF: float = 0.6
     TRAINING_MIN_GAP_S: int = 5  # don't save more than one crop this often (avoid bursts)
+    # Per-animal descriptions fed to Claude (editable from the dashboard). These label the
+    # reference photos and give the model distinguishing cues; the IR/size guidance is in the
+    # system prompt. Keep "only Grrr is fed" explicit.
+    GRRR_DESC: str = (
+        "Grrr: a tiny, old, black schnoodle. Small body, short legs, scruffy/curly coat. "
+        "The ONLY animal that may be fed."
+    )
+    BOWIE_DESC: str = (
+        "Bowie: a medium-sized, tan/blonde, lanky dog with a smooth short coat. Much larger "
+        "and longer-legged than Grrr. Never fed."
+    )
+    CAT_DESC: str = (
+        "The cat: sleek short coat, upright triangular ears, short muzzle, long tail. Never fed."
+    )
 
     def active_window(self) -> tuple[time, time]:
         return parse_hhmm(self.ACTIVE_START), parse_hhmm(self.ACTIVE_END)

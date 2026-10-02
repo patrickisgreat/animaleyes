@@ -140,8 +140,11 @@ def image_block(jpeg: bytes) -> dict[str, Any]:
     }
 
 
-def load_reference_blocks(reference_dir: Path) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def load_reference_blocks(
+    reference_dir: Path, descriptions: dict[str, str] | None = None
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Content blocks for every reference photo, grouped and labelled per animal."""
+    descriptions = descriptions or ANIMAL_DESCRIPTIONS
     blocks: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     for animal in ANIMALS:
@@ -152,7 +155,7 @@ def load_reference_blocks(reference_dir: Path) -> tuple[list[dict[str, Any]], di
         )
         counts[animal] = len(paths)
         blocks.append(
-            {"type": "text", "text": f"Reference photos of {ANIMAL_DESCRIPTIONS[animal]}"}
+            {"type": "text", "text": f"Reference photos of {descriptions.get(animal, animal)}"}
         )
         for path in paths:
             blocks.append(image_block(to_jpeg(path.read_bytes())))
@@ -176,21 +179,30 @@ class ClaudeIdentifier:
         model: Callable[[], str],
         clock: Callable[[], datetime] = datetime.now,
         client: anthropic.Anthropic | None = None,
+        descriptions: Callable[[], dict[str, str]] | None = None,
     ):
         self.reference_dir = reference_dir
         self.store = store
         self.model = model
         self.clock = clock
         self.client = client or anthropic.Anthropic()
+        self.descriptions = descriptions or (lambda: ANIMAL_DESCRIPTIONS)
         self.reference_blocks: list[dict[str, Any]] = []
         self.reference_counts: dict[str, int] = {}
+        self._desc_used: dict[str, str] | None = None
         self.reload_references()
 
     def reload_references(self) -> None:
-        self.reference_blocks, self.reference_counts = load_reference_blocks(self.reference_dir)
+        desc = self.descriptions()
+        self.reference_blocks, self.reference_counts = load_reference_blocks(
+            self.reference_dir, desc
+        )
+        self._desc_used = dict(desc)
         log.info("reference photos: %s", self.reference_counts)
 
     def identify(self, frames: list[Frame]) -> Verdict:
+        if self.descriptions() != self._desc_used:  # a dashboard edit → rebuild the cached prefix
+            self.reload_references()
         data = self._ask("identify", frames, IDENTIFY_QUESTION, IDENTIFY_SCHEMA)
         return Verdict.from_json(data) if data else Verdict(reason="llm call failed")
 

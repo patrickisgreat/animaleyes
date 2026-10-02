@@ -264,3 +264,26 @@ def test_open_now_raises_on_timeout_when_no_feed_active(monkeypatch) -> None:
         raise AssertionError("expected FeederError")
     except FeederError:
         pass
+
+
+def test_claude_rebuilds_reference_blocks_when_descriptions_change(tmp_path, monkeypatch) -> None:
+    """Editing an animal description from the dashboard takes effect: the cached prefix is
+    rebuilt with the new label on the next identify."""
+    from animaleyes.vision import ClaudeIdentifier
+
+    desc = {"grrr": "v1", "bowie": "b", "cat": "c"}
+    for a in ("grrr", "bowie", "cat"):
+        (tmp_path / a).mkdir()
+
+    class _NoClient:
+        pass
+
+    ident = ClaudeIdentifier(
+        tmp_path, store=None, model=lambda: "m", client=_NoClient(), descriptions=lambda: desc
+    )
+    assert any("v1" in b.get("text", "") for b in ident.reference_blocks)
+    desc["grrr"] = "a new description"
+    # identify() would call the API, so just exercise the rebuild guard directly.
+    if ident.descriptions() != ident._desc_used:
+        ident.reload_references()
+    assert any("a new description" in b.get("text", "") for b in ident.reference_blocks)

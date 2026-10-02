@@ -531,6 +531,9 @@ PAGE = """<!doctype html>
  @media(hover:hover){.thumbbar{opacity:0;transition:.12s}.thumb:hover .thumbbar{opacity:1}}
  .tb{font-size:10px;font-weight:700;padding:4px 6px;min-height:auto;border-radius:6px;line-height:1}
  .tb.del{color:var(--bad);border-color:rgba(255,92,102,.35)}
+ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);
+   border-radius:8px;padding:10px;font:inherit;font-size:14px;resize:vertical;min-height:56px}
+ .deslbl{font-weight:700;text-transform:capitalize;margin:12px 0 5px;font-size:14px}
  details{border-top:1px solid var(--border);margin-top:4px}
  details summary{cursor:pointer;padding:12px 0 4px;font-size:12px;font-weight:700;
    text-transform:uppercase;letter-spacing:.08em;color:var(--muted);list-style:none}
@@ -616,6 +619,17 @@ PAGE = """<!doctype html>
     <div class="refgrid" id="refs"></div>
     <div class="btnrow"><button class="sm" onclick="reloadRefs()">Reload photos</button></div>
     <div class="hint">What the detector learns each animal from. At night the camera is infra‑red, so a black coat is invisible — “Grab frame” captures real IR shots to teach it size and shape.</div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <details>
+      <summary>Animal descriptions (for Claude)</summary>
+      <div class="hint" style="margin:6px 0 4px">Short, distinguishing descriptions the model uses to tell them apart (used by the Claude step). Keep “only Grrr is fed” explicit. Takes effect on the next check.</div>
+      <div class="deslbl">Grrr</div><textarea id="d_grrr"></textarea>
+      <div class="deslbl">Bowie</div><textarea id="d_bowie"></textarea>
+      <div class="deslbl">Cat</div><textarea id="d_cat"></textarea>
+      <div class="btnrow"><button class="primary sm" onclick="saveDescriptions()">Save descriptions</button></div>
+    </details>
   </div>
 
   <div class="card" style="margin-top:16px">
@@ -812,6 +826,18 @@ function thumbHtml(set, a, n){
     others.map(o => `<button class="tb" title="re-tag as ${NAMES[o]||o}" onclick="photoRetag('${set}','${a}','${en}','${o}')">${(NAMES[o]||o)[0]}</button>`).join("")+
     `</div></div>`;
 }
+async function loadDescriptions(){
+  const c = await (await fetch("/api/config")).json();
+  document.getElementById("d_grrr").value = c.GRRR_DESC||"";
+  document.getElementById("d_bowie").value = c.BOWIE_DESC||"";
+  document.getElementById("d_cat").value = c.CAT_DESC||"";
+}
+async function saveDescriptions(){
+  const g=(id)=>document.getElementById(id).value;
+  const body = {GRRR_DESC:g("d_grrr"), BOWIE_DESC:g("d_bowie"), CAT_DESC:g("d_cat")};
+  const r = await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok) toast("Rejected: "+(await r.text()),true); else toast("Descriptions saved");
+}
 async function photoDel(set,a,n){ await fetch(`/api/photos/${set}/${a}/${n}`,{method:"DELETE"}); toast("Deleted"); loadGallery(); }
 async function photoRetag(set,a,n,to){ await fetch(`/api/photos/${set}/${a}/${n}/retag?to=${to}`,{method:"POST"}); toast("Re-tagged as "+(NAMES[to]||to)); loadGallery(); }
 
@@ -881,7 +907,7 @@ document.getElementById("live").onerror = () => { if (live) setTimeout(startLive
 document.addEventListener("visibilitychange", () => { if (live && !document.hidden) startLive(); });
 // Load the training gallery lazily when the section is first opened (it can be many images).
 document.getElementById("trainCard").addEventListener("toggle", function(){ if (this.open) loadGallery(); });
-startLive(); refresh(); loadConfig(); loadEvents();
+startLive(); refresh(); loadConfig(); loadEvents(); loadDescriptions();
 setInterval(refresh, 1500); setInterval(loadEvents, 15000);
 </script></body></html>
 """
