@@ -176,3 +176,41 @@ def test_status_reports_lid_and_current_plate(h: Harness) -> None:
     h.machine.request_manual_action("close")
     h.tick(motion=False)
     assert c.get("/api/status").json()["lid_open"] is False
+
+
+def test_tailscale_device_gets_in_without_password(h: Harness) -> None:
+    c = client(h)
+    h.machine.settings = h.config.load()  # DASH_AUTH defaults to "tailscale"
+    # On the tailnet, tailscale serve injects this header → no password needed.
+    r = c.get("/api/status", auth=None, headers={"Tailscale-User-Login": "pb@example.com"})
+    assert r.status_code == 200
+
+
+def test_tailscale_header_not_trusted_via_cloudflare(h: Harness) -> None:
+    c = client(h)
+    h.machine.settings = h.config.load()
+    # A forged header arriving over the public tunnel (cf-ray present) must NOT grant access.
+    r = c.get(
+        "/api/status",
+        auth=None,
+        headers={"Tailscale-User-Login": "pb@example.com", "Cf-Ray": "abc123"},
+    )
+    assert r.status_code == 401
+
+
+def test_basic_mode_ignores_tailscale_header(h: Harness) -> None:
+    c = client(h)
+    h.config.update({"DASH_AUTH": "basic"})
+    h.machine.settings = h.config.load()
+    assert c.get("/api/status", auth=None, headers={"Tailscale-User-Login": "x"}).status_code == 401
+    assert c.get("/api/status").status_code == 200  # client has basic creds
+
+
+def test_healthz_fails_when_loop_is_stale(h: Harness) -> None:
+    c = client(h)
+    h.machine.settings = h.config.load()
+    assert c.get("/healthz", auth=None).status_code == 200  # no heartbeat yet = starting
+    h.store.set("heartbeat_at", h.clock.now.isoformat())
+    assert c.get("/healthz", auth=None).status_code == 200  # fresh
+    h.clock.advance(minutes=30)
+    assert c.get("/healthz", auth=None).status_code == 503  # loop stale → unhealthy → autoheal

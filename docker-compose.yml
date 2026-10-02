@@ -1,8 +1,13 @@
 services:
   animaleyes:
-    build: .
+    build:
+      context: .
+      args:
+        WITH_YOLO: "1"           # bake the local YOLO detector into the image
     container_name: animaleyes
-    restart: unless-stopped
+    restart: unless-stopped      # auto-restart on crash and on boot (docker is enabled)
+    labels:
+      - autoheal=true            # let the autoheal sidecar restart us if the healthcheck fails
     env_file: .env
     # Host networking so the app can find the camera by MAC in the host's ARP table (its IP
     # comes from DHCP). The dashboard binds 127.0.0.1:8081 only; Cloudflare Tunnel and
@@ -17,10 +22,25 @@ services:
       - HOST=127.0.0.1
       - PORT=8081
     healthcheck:
+      # /healthz fails (503) if the state-machine loop stops ticking, so a hung-but-running
+      # process is marked unhealthy and autoheal restarts it.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz')"]
       interval: 60s
       timeout: 10s
       retries: 3
+      start_period: 30s
+
+  # Watches for containers labeled autoheal=true that go unhealthy and restarts them. Docker's
+  # own restart policy only covers crashes/exits, not hangs; this closes that gap.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: animaleyes-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   petlibro-token:

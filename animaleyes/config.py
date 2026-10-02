@@ -5,6 +5,7 @@ Settings are re-read on every loop so dashboard edits take effect without a rest
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import asdict, dataclass, fields
@@ -12,6 +13,8 @@ from datetime import time
 from pathlib import Path
 
 import tomli_w
+
+log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(os.environ.get("ANIMALEYES_CONFIG", "config.toml"))
 
@@ -33,6 +36,9 @@ class Settings:
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
     FEED_RETRY_BACKOFF_S: int = 120  # after a failed open, wait before trying to open again
     LID_POLL_S: int = 20  # how often to read the feeder's real lid state (0 = never)
+    # Dashboard auth: "tailscale" = trust any device on the tailnet (no password), basic-auth
+    # fallback off-tailnet; "basic" = always require the password; "none" = open (don't).
+    DASH_AUTH: str = "tailscale"
     LLM_MIN_INTERVAL_S: int = 3
     HEARTBEAT_MIN: int = 5
     LLM_MODEL: str = "claude-opus-5"
@@ -81,9 +87,17 @@ class ConfigStore:
     def load(self) -> Settings:
         if not self.path.exists():
             return Settings()
-        data = tomllib.loads(self.path.read_text())
         known = {f.name for f in fields(Settings)}
-        return Settings(**{k: v for k, v in data.items() if k in known})
+        try:
+            data = tomllib.loads(self.path.read_text())
+            settings = Settings(**{k: v for k, v in data.items() if k in known})
+            self._last_good = settings
+            return settings
+        except Exception as exc:
+            # A malformed config.toml (e.g. a hand/dashboard edit with a syntax error) must
+            # never crash-loop the daemon. Fall back to the last good settings, else defaults.
+            log.error("config.toml invalid (%s); using last-good/defaults", exc)
+            return getattr(self, "_last_good", None) or Settings()
 
     def update(self, changes: dict[str, object]) -> Settings:
         current = self.load()

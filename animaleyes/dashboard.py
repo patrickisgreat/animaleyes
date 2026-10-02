@@ -79,9 +79,8 @@ def create_app(
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
     ANIMALS = ("grrr", "bowie", "cat")
 
-    def auth(credentials: Credentials) -> None:
-        # Fail closed: with no password configured, nobody gets in.
-        ok = (
+    def _basic_ok(credentials: Credentials) -> bool:
+        return (
             bool(secrets.dash_password)
             and credentials is not None
             and secrets_lib.compare_digest(
@@ -91,18 +90,41 @@ def create_app(
                 credentials.password.encode(), secrets.dash_password.encode()
             )
         )
-        if not ok:
-            raise HTTPException(
-                status_code=401,
-                detail="login required",
-                headers={"WWW-Authenticate": 'Basic realm="animaleyes"'},
-            )
+
+    def auth(request: Request, credentials: Credentials) -> None:
+        mode = machine.settings.DASH_AUTH
+        if mode == "none":
+            return
+        # Tailscale trust: `tailscale serve` injects an identity header for the connecting
+        # tailnet device, so being on the tailnet IS the authentication — no password. We only
+        # trust it when the request did NOT arrive via the public Cloudflare tunnel (which adds
+        # cf-ray), so the header can't be forged from the internet.
+        ts_user = request.headers.get("tailscale-user-login")
+        via_cloudflare = "cf-ray" in request.headers
+        if mode == "tailscale" and ts_user and not via_cloudflare:
+            return
+        # Basic-auth fallback (public/Cloudflare path, or mode="basic").
+        if _basic_ok(credentials):
+            return
+        raise HTTPException(
+            status_code=401,
+            detail="login required",
+            headers={"WWW-Authenticate": 'Basic realm="animaleyes"'},
+        )
 
     guarded = [Depends(auth)]
 
     @app.get("/healthz")
-    def healthz() -> dict[str, bool]:
-        """Unauthenticated liveness for the container healthcheck. Reveals nothing."""
+    def healthz() -> dict[str, Any]:
+        """Liveness for the container healthcheck (and autoheal). Fails if the state-machine
+        loop has stopped ticking, so a hung-but-running process gets restarted. Unauthenticated
+        and reveals nothing sensitive."""
+        hb = store.get("heartbeat_at")
+        if hb:
+            age = (machine.clock() - datetime.fromisoformat(hb)).total_seconds()
+            limit = max(180, 3 * machine.settings.HEARTBEAT_MIN * 60)
+            if age > limit:
+                raise HTTPException(status_code=503, detail=f"loop stale {int(age)}s")
         return {"ok": True}
 
     @app.get("/", response_class=HTMLResponse, dependencies=guarded)
