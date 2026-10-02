@@ -164,11 +164,12 @@ def create_app(
         return {"ok": True}
 
     @app.get("/", response_class=HTMLResponse, dependencies=guarded)
-    def index() -> str:
+    def index() -> HTMLResponse:
         # Serve the built React app; fall back to a minimal page when it isn't built (tests).
-        if index_html and index_html.is_file():
-            return index_html.read_text()
-        return FALLBACK_PAGE
+        html = index_html.read_text() if (index_html and index_html.is_file()) else FALLBACK_PAGE
+        # Never cache the shell — the hashed assets it points at change on every build, so a
+        # cached old index.html would reference assets that no longer exist (blank page).
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
     @app.get("/api/status", dependencies=guarded)
     def status() -> dict[str, Any]:
