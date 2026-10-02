@@ -24,7 +24,10 @@ REGION = "US"
 APP_ID = 1
 APP_SN = "c35772530d1041699c87fe62348507a8"
 TOKEN_PATH = Path.home() / ".petlibro-cli" / "token.json"
-TIMEOUT = 15.0
+# Opening the Polar's wet-food lid drives a vacuum/pump motor and the cloud round-trip can
+# take well over 15s; a short timeout reports a false failure for a feed that is still
+# completing. Configurable via env. NOTE: keep in sync with ~/code/petlibro-cli (vendored).
+TIMEOUT = float(os.environ.get("PETLIBRO_HTTP_TIMEOUT", "60"))
 
 CODE_OK = 0
 CODE_NOT_LOGGED_IN = 1009

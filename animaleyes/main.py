@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from .camera import Camera, FrameBuffer
 from .config import DEFAULT_CONFIG_PATH, ConfigStore, Secrets
 from .dashboard import create_app
+from .detect import Identifier
 from .events import ReolinkEvents
 from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
@@ -51,16 +52,35 @@ class UnavailableFeeder:
     def close(self) -> None:
         raise FeederError(self.error)
 
+    def manual_feed_active(self) -> bool:
+        raise FeederError(self.error)
+
+
+def build_identifier(name: str, config: ConfigStore, store: Store):
+    """Select the detector backend by config. Backends share the Identifier interface, so the
+    state machine is unchanged whichever is chosen."""
+    if name == "yolo":
+        from .yolo import YoloConfig, YoloIdentifier
+
+        s = config.load()
+        log.info("identifier: YOLO (%s)", s.YOLO_MODEL)
+        return YoloIdentifier(
+            s.YOLO_MODEL,
+            YoloConfig(min_conf=s.YOLO_MIN_CONF, grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION),
+        )
+    log.info("identifier: Claude (%s)", config.load().LLM_MODEL)
+    return ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+
 
 def build(
     secrets: Secrets,
-) -> tuple[Machine, Camera, ConfigStore, Store, ClaudeIdentifier, ReolinkEvents | None]:
+) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
     frames = FrameBuffer()
     motion = MotionDetector()
     camera = Camera(secrets, frames, on_frame=motion.feed)
-    llm = ClaudeIdentifier(DATA_DIR / "reference", store, model=lambda: config.load().LLM_MODEL)
+    llm = build_identifier(config.load().IDENTIFIER, config, store)
     events: ReolinkEvents | None = None
     if secrets.kasa_stream_url:
         # Camera-driven motion gate (ONVIF). Keeps the LLM from firing on frame-diff noise.

@@ -131,6 +131,7 @@ class Machine:
         now = self.clock()
         self._check_camera(now)
         self._heartbeat(now)
+        self._poll_lid(now)
         self._consume_dashboard_requests(now)
 
         state = self.state
@@ -196,12 +197,17 @@ class Machine:
             self.store.set("current_plate", plate)
             feeder.open_now(plate)
         except FeederError as exc:
+            # Back off so a failing feeder isn't hammered every tick (which drains the device
+            # and spams the cloud). The dog's return after the window still re-triggers later.
+            self.store.set("feed_failed_at", now.isoformat())
             event_id = self.store.add_event(
                 now, "feed_failed", str(exc), {"trigger": trigger, "mode": mode}, frames
             )
             self._notify(f"FEED FAILED ({mode}): {exc}", event_id)
             self._transition(State.IDLE, "feed failed", error=str(exc))
             return
+        self.store.set("feed_failed_at", None)
+        self.store.set("lid_actual_open", 1)
         loaded = self.store.loaded_plates()
         self.store.set("feeding_plate", plate)
         self.store.set("opened_at", now.isoformat())
@@ -292,6 +298,7 @@ class Machine:
                 f"Loaded plates left: {self.store.loaded_plates()}",
                 event_id,
             )
+        self.store.set("lid_actual_open", 0)
         self.verdicts.clear()
         self._transition(State.COOLDOWN, "lid closed", **data)
 
@@ -357,6 +364,9 @@ class Machine:
         last_open = self._when("last_open_at")
         if last_open and now - last_open < timedelta(minutes=self.settings.MIN_GAP_MIN):
             return f"last open {int((now - last_open).total_seconds() // 60)} min ago < MIN_GAP_MIN"
+        failed = self._when("feed_failed_at")
+        if failed and now - failed < timedelta(seconds=self.settings.FEED_RETRY_BACKOFF_S):
+            return f"feed failed {int((now - failed).total_seconds())}s ago < FEED_RETRY_BACKOFF_S"
         return None
 
     def _check_veto(self, now: datetime) -> None:
@@ -450,6 +460,22 @@ class Machine:
             f"camera={'OFFLINE' if self.camera_offline else 'ok'}"
         )
 
+    def _poll_lid(self, now: datetime) -> None:
+        """Read the feeder's real lid state so the dashboard reflects opens done out-of-band
+        (e.g. from the PetLibro app), not just opens the machine made. Throttled, best-effort;
+        uses _feeder() so DRY_RUN never touches the real device."""
+        interval = self.settings.LID_POLL_S
+        if interval <= 0:
+            return
+        last = self._when("lid_checked_at")
+        if last and (now - last).total_seconds() < interval:
+            return
+        self.store.set("lid_checked_at", now.isoformat())
+        try:
+            self.store.set("lid_actual_open", 1 if self._feeder().manual_feed_active() else 0)
+        except FeederError:
+            pass  # leave the last known value rather than guessing
+
     def _consume_dashboard_requests(self, now: datetime) -> None:
         if self.store.get("plates_updated"):
             self.store.set("plates_updated", None)
@@ -488,10 +514,12 @@ class Machine:
                 feeder.open_now(plate)
                 self.store.set("current_plate", plate)
                 self.store.set("lid_manual_open", 1)
+                self.store.set("lid_actual_open", 1)
                 detail = {"mode": mode, "plate": plate}
             elif action == "close":
                 feeder.close()
                 self.store.set("lid_manual_open", None)
+                self.store.set("lid_actual_open", 0)
                 detail = {"mode": mode}
             else:  # rotate
                 feeder.rotate()

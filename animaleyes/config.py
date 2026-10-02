@@ -31,9 +31,15 @@ class Settings:
     MOTION_PIXEL_FRACTION: float = 0.02
     MOTION_HOLD_S: int = 20
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
+    FEED_RETRY_BACKOFF_S: int = 120  # after a failed open, wait before trying to open again
+    LID_POLL_S: int = 20  # how often to read the feeder's real lid state (0 = never)
     LLM_MIN_INTERVAL_S: int = 3
     HEARTBEAT_MIN: int = 5
     LLM_MODEL: str = "claude-opus-5"
+    IDENTIFIER: str = "claude"  # "claude" (cloud LLM) | "yolo" (local, free)
+    YOLO_MODEL: str = "yolo11n.pt"  # pretrained COCO; dog/cat/person
+    YOLO_MIN_CONF: float = 0.4
+    GRRR_MAX_BOX_FRACTION: float = 0.18  # a dog box this fraction of frame or smaller = Grrr
 
     def active_window(self) -> tuple[time, time]:
         return parse_hhmm(self.ACTIVE_START), parse_hhmm(self.ACTIVE_END)

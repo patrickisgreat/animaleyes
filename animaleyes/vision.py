@@ -12,16 +12,19 @@ import base64
 import io
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import anthropic
 from PIL import Image
 
 from .camera import Frame
+from .detect import FeedingVerdict, Identifier, Verdict
 from .store import Store
+
+# Re-exported for backward compatibility: callers still do `from .vision import Verdict, ...`.
+__all__ = ["ClaudeIdentifier", "FeedingVerdict", "Identifier", "Verdict", "estimate_cost_usd"]
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +61,9 @@ IDENTIFY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "animal": {"type": "string", "enum": ["grrr", "bowie", "cat", "none", "unsure"]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        # The structured-output API rejects minimum/maximum on numbers; the prompt states the
+        # 0..1 range and the machine clamps when reading confidence.
+        "confidence": {"type": "number"},
         "at_bowl": {"type": "boolean"},
         "other_animals_present": {
             "type": "array",
@@ -104,72 +109,6 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.0, 5.0),
 }
 CACHE_TTL = "1h"
-
-
-@dataclass
-class Verdict:
-    animal: str = "unsure"
-    confidence: float = 0.0
-    at_bowl: bool = False
-    other_animals_present: list[str] = field(default_factory=list)
-    reason: str = ""
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> Verdict:
-        return cls(
-            animal=str(data.get("animal", "unsure")),
-            confidence=float(data.get("confidence", 0.0)),
-            at_bowl=bool(data.get("at_bowl", False)),
-            other_animals_present=[str(a) for a in data.get("other_animals_present", [])],
-            reason=str(data.get("reason", "")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "animal": self.animal,
-            "confidence": self.confidence,
-            "at_bowl": self.at_bowl,
-            "other_animals_present": self.other_animals_present,
-            "reason": self.reason,
-        }
-
-    def is_grrr(self, min_confidence: float) -> bool:
-        return (
-            self.animal == "grrr"
-            and self.confidence >= min_confidence
-            and self.at_bowl
-            and not self.other_animals_present
-        )
-
-
-@dataclass
-class FeedingVerdict:
-    grrr_at_bowl: bool = False
-    bowl: str = "unsure"
-    other_animals_present: list[str] = field(default_factory=list)
-    reason: str = ""
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> FeedingVerdict:
-        return cls(
-            grrr_at_bowl=bool(data.get("grrr_at_bowl", False)),
-            bowl=str(data.get("bowl", "unsure")),
-            other_animals_present=[str(a) for a in data.get("other_animals_present", [])],
-            reason=str(data.get("reason", "")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "grrr_at_bowl": self.grrr_at_bowl,
-            "bowl": self.bowl,
-            "other_animals_present": self.other_animals_present,
-            "reason": self.reason,
-        }
-
-
-class Identifier(Protocol):
-    def identify(self, frames: list[Frame]) -> Verdict: ...
-    def feeding_check(self, frames: list[Frame]) -> FeedingVerdict: ...
 
 
 def estimate_cost_usd(model: str, usage: dict[str, int]) -> float:

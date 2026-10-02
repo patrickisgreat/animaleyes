@@ -76,11 +76,16 @@ class FakeFeeder:
         if self.fail_open:
             raise FeederError("cloud said no")
         self.calls.append(f"open:{plate}")
+        self._open = True
 
     def close(self) -> None:
         if self.fail_close:
             raise FeederError("close failed")
         self.calls.append("close")
+        self._open = False
+
+    def manual_feed_active(self) -> bool:
+        return getattr(self, "_open", False)
 
     @property
     def opens(self) -> list[str]:

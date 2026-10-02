@@ -135,10 +135,16 @@ def create_app(
             "camera_events_ok": (machine.events.last_error is None)
             if machine.events is not None
             else None,
-            "lid_open": machine.state in ("OPENING", "FEEDING", "CLOSING")
-            or bool(store.get("lid_manual_open")),
+            # Prefer the feeder's real lid state (catches opens done from the PetLibro app);
+            # fall back to what the machine knows from its own actions.
+            "lid_open": (store.get("lid_actual_open") == "1")
+            if store.get("lid_actual_open") is not None
+            else (
+                machine.state in ("OPENING", "FEEDING", "CLOSING")
+                or bool(store.get("lid_manual_open"))
+            ),
             "current_plate": store.get_int("current_plate", 0) or None,
-            "feeding_plate": store.get_int("feeding_plate", 0) or None
+            "feeding_plate": (store.get_int("feeding_plate", 0) or None)
             if machine.state == "FEEDING"
             else None,
             "next_allowed_feed": next_feed.isoformat(timespec="seconds") if next_feed else None,

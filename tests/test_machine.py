@@ -352,3 +352,15 @@ def test_falls_back_to_frame_diff_when_events_unhealthy(h: Harness) -> None:
     assert h.state() == "IDLE"  # broken events ignored, frame-diff quiet
     h.tick(motion=True)  # frame-diff fallback still feeds the dog
     assert h.state() == "WATCHING"
+
+
+def test_feed_failure_backs_off_before_retrying(h: Harness) -> None:
+    h.feeder.fail_open = True
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert h.events("feed_failed")
+    assert h.state() in ("IDLE", "WATCHING")
+    # Immediately re-confirming must NOT hammer the feeder during the backoff window.
+    opens_before = len(h.feeder.opens)
+    confirm_grrr(h)
+    assert len(h.feeder.opens) == opens_before  # blocked by FEED_RETRY_BACKOFF_S

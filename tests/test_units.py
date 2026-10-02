@@ -214,3 +214,53 @@ def test_events_apply_tracks_motion_and_animal() -> None:
         '</wsnt:Topic><SimpleItem Name="State" Value="true"/></wsnt:NotificationMessage>'
     )
     assert e.animal_state is True
+
+
+def test_open_now_treats_timeout_as_success_when_feed_active(monkeypatch) -> None:
+    """A slow open that times out on the HTTP read is treated as success when the device
+    confirms a manual feed is active — so the machine won't retry and double-feed."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from animaleyes.feeder import PetlibroCli
+
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd[1])
+        if cmd[1] == "feed":
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="HTTP error: The read operation timed out"
+            )
+        if cmd[1] == "close":  # manual_feed_active() dry-run plan check
+            return SimpleNamespace(returncode=0, stdout='Response data: {"feedId": 123}', stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    PetlibroCli("AF0").open_now(1)  # must not raise
+    assert "feed" in seen and "close" in seen
+
+
+def test_open_now_raises_on_timeout_when_no_feed_active(monkeypatch) -> None:
+    import subprocess
+    from types import SimpleNamespace
+
+    from animaleyes.feeder import FeederError, PetlibroCli
+
+    def fake_run(cmd, **kw):
+        if cmd[1] == "feed":
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="HTTP error: The read operation timed out"
+            )
+        if cmd[1] == "close":
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="No active manual feed (manualFeedId is empty)."
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    try:
+        PetlibroCli("AF0").open_now(1)
+        raise AssertionError("expected FeederError")
+    except FeederError:
+        pass
