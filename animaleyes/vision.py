@@ -99,6 +99,14 @@ FEEDING_QUESTION = (
     "Is there still food visible in the open bowl, or has it been eaten? "
     "List Bowie or the cat in other_animals_present if they are visible."
 )
+VERIFY_QUESTION = (
+    "The feeder lid just opened to serve a plate. Look only at the bowl under the open lid "
+    "and judge what was SERVED, ignoring the animal: set bowl='food' only if the bowl clearly "
+    "contains wet food, bowl='empty' if the bowl is clearly bare/empty (a plate with no food), "
+    "and bowl='unsure' if you cannot tell (dark, obscured, blurry). When unsure, say 'unsure' — "
+    "do NOT guess 'empty', because that would rotate the tray and waste a good plate. Set "
+    "grrr_at_bowl true if the small black dog is eating from it."
+)
 
 # USD per million tokens: (input, output). Cache writes with a 1h TTL cost 2x input,
 # cache reads cost 0.1x input. Used for the dashboard estimate only.
@@ -208,6 +216,11 @@ class ClaudeIdentifier:
 
     def feeding_check(self, frames: list[Frame]) -> FeedingVerdict:
         data = self._ask("feeding", frames, FEEDING_QUESTION, FEEDING_SCHEMA)
+        return FeedingVerdict.from_json(data) if data else FeedingVerdict(reason="llm call failed")
+
+    def verify_food(self, frames: list[Frame]) -> FeedingVerdict:
+        # "llm call failed" -> bowl defaults to "unsure", so a failed call never rotates the tray.
+        data = self._ask("verify", frames, VERIFY_QUESTION, FEEDING_SCHEMA)
         return FeedingVerdict.from_json(data) if data else FeedingVerdict(reason="llm call failed")
 
     def _ask(

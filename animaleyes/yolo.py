@@ -135,5 +135,10 @@ class YoloIdentifier:
             reason=v.reason,
         )
 
+    def verify_food(self, frames: list[Frame]) -> FeedingVerdict:
+        # YOLO/COCO has no food class, so it can't tell a served bowl from an empty plate.
+        # "unsure" means the state machine won't rotate the tray on YOLO's say-so.
+        return FeedingVerdict(bowl="unsure", reason="yolo cannot judge food in the bowl")
+
     def reload_references(self) -> None:
         pass  # no reference imagery for the detector backend

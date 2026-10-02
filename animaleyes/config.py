@@ -65,6 +65,15 @@ class Settings:
     # feeder (it only writes image files).
     CAPTURE_MODE: bool = False
     CAPTURE_MIN_GAP_S: int = 3  # at most one captured frame this often
+    # Feeding verification: after opening a plate, check with the camera that the served bowl
+    # actually has food. If it's confirmed empty, close it and rotate to the next loaded plate,
+    # so a wrong/empty plate doesn't mean a midnight rescue. Off by default (it moves the tray
+    # based on a vision read, so enable it deliberately once the close-up framing is dialled in).
+    VERIFY_FOOD: bool = False
+    VERIFY_POLL_S: int = 10  # how often to run the food check while verifying
+    VERIFY_EMPTY_CONFIRMATIONS: int = 2  # consecutive "empty" reads before rotating (anti-misfire)
+    VERIFY_TIMEOUT_S: int = 90  # if still unsure after this, stop second-guessing and just feed
+    MAX_ROTATE_FOR_FOOD: int = 2  # cap rotations hunting for food (never churn the whole tray)
     # Per-animal descriptions fed to Claude (editable from the dashboard). These label the
     # reference photos and give the model distinguishing cues; the IR/size guidance is in the
     # system prompt. Keep "only Grrr is fed" explicit.

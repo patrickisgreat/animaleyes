@@ -51,6 +51,8 @@ MAIN_EVENT_KINDS = (
     "veto",
     "feed_failed",
     "close_failed",
+    "rotated_empty_plate",
+    "empty_no_food",
     "wanted_food_none_left",
     "startup",
     "bowie_during_feed",
@@ -210,7 +212,7 @@ def create_app(
             "lid_open": (store.get("lid_actual_open") == "1")
             if store.get("lid_actual_open") is not None
             else (
-                machine.state in ("OPENING", "FEEDING", "CLOSING")
+                machine.state in ("OPENING", "VERIFYING", "FEEDING", "CLOSING")
                 or bool(store.get("lid_manual_open"))
             ),
             "current_plate": store.get_int("current_plate", 0) or None,

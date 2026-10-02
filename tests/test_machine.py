@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from tests.conftest import BOWIE, CAT, EATING, GONE_EMPTY, GONE_FULL, GRRR, Harness
+from tests.conftest import (
+    BOWIE,
+    CAT,
+    EATING,
+    FOOD_UNSURE,
+    GONE_EMPTY,
+    GONE_FULL,
+    GRRR,
+    HAS_FOOD,
+    NO_FOOD,
+    Harness,
+)
 
 
 def confirm_grrr(h: Harness) -> None:
@@ -434,3 +445,61 @@ def test_capture_mode_runs_outside_active_window(h: Harness) -> None:
     h.tick(motion=True)
     assert h.state() == "OUTSIDE_WINDOW"  # feeding logic is dormant...
     assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 1  # ...but capture still runs
+
+
+def _open_with_verify(h: Harness, *plates: int) -> None:
+    h.config.update({"VERIFY_FOOD": True})
+    h.load_plates(*(plates or (1,)))
+    confirm_grrr(h)  # motion + 3x Grrr -> OPENING -> VERIFYING (lid open, not yet feeding)
+
+
+def test_verify_food_present_proceeds_to_feeding(h: Harness) -> None:
+    h.llm.verify_result = HAS_FOOD
+    _open_with_verify(h, 1)
+    assert h.state() == "VERIFYING"
+    assert h.feeder.opens == ["open:1"]
+    h.run(seconds=15)  # first food check fires (>= VERIFY_POLL_S)
+    assert h.state() == "FEEDING"
+    assert "rotate" not in h.feeder.calls  # a full plate is never rotated away
+    assert h.llm.verify_calls >= 1
+
+
+def test_verify_empty_plate_rotates_to_a_full_one(h: Harness) -> None:
+
+    # First plate reads empty twice, then the next plate has food.
+    h.llm.verify_results = [NO_FOOD, NO_FOOD, HAS_FOOD]
+    _open_with_verify(h, 1, 2)
+    h.run(seconds=40)
+    assert h.events("rotated_empty_plate"), "should have rotated off the empty plate"
+    assert "open:2" in h.feeder.opens  # re-opened the next plate
+    assert "rotate" in h.feeder.calls
+    assert h.store.plates()[1] == "empty"  # the empty plate is recorded so it isn't re-offered
+    assert h.state() == "FEEDING"
+
+
+def test_verify_all_empty_alerts_and_closes(h: Harness) -> None:
+    h.llm.verify_result = NO_FOOD  # every plate reads empty
+    h.config.update({"MAX_ROTATE_FOR_FOOD": 2})
+    _open_with_verify(h, 1, 2)
+    h.run(seconds=80)
+    assert h.events("empty_no_food"), "should alert when no full plate is found"
+    assert h.state() in ("CLOSING", "COOLDOWN", "DONE")  # lid not left open on an empty plate
+
+
+def test_verify_unsure_never_rotates_and_times_out_to_feeding(h: Harness) -> None:
+
+    h.llm.verify_result = FOOD_UNSURE
+    h.config.update({"VERIFY_TIMEOUT_S": 30})
+    _open_with_verify(h, 1, 2)
+    h.run(seconds=45)
+    assert not h.events("rotated_empty_plate")  # unsure must never rotate the tray
+    assert "rotate" not in h.feeder.calls
+    assert h.state() == "FEEDING"  # don't starve Grrr: feed once verification gives up
+    assert h.store.plates()[1] == "loaded"
+
+
+def test_verify_off_opens_straight_to_feeding(h: Harness) -> None:
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    assert h.llm.verify_calls == 0

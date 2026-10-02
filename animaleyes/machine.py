@@ -41,6 +41,7 @@ class State(StrEnum):
     IDLE = "IDLE"
     WATCHING = "WATCHING"
     OPENING = "OPENING"
+    VERIFYING = "VERIFYING"
     FEEDING = "FEEDING"
     CLOSING = "CLOSING"
     COOLDOWN = "COOLDOWN"
@@ -119,8 +120,9 @@ class Machine:
         self.settings = self.config.load()
         now = self.clock()
         state = self.state
-        if state in (State.OPENING, State.FEEDING):
-            # The feed command may already have gone out. Assume the lid is open; never re-send.
+        if state in (State.OPENING, State.VERIFYING, State.FEEDING):
+            # The feed command may already have gone out. Assume the lid is open; never re-send
+            # (and never re-verify/re-rotate on resume — just feed whatever is already served).
             self.store.set("state", State.FEEDING)
             self.store.set("grrr_last_seen_at", now.isoformat())
             resumed = "resumed FEEDING after restart; lid assumed open"
@@ -144,7 +146,7 @@ class Machine:
             self._tick_capture(now)
 
         state = self.state
-        lid_open = state in (State.FEEDING, State.CLOSING)
+        lid_open = state in (State.VERIFYING, State.FEEDING, State.CLOSING)
         if not self.settings.ENABLED and not lid_open:
             self._transition(State.OUTSIDE_WINDOW, "ENABLED is false")
             return
@@ -157,6 +159,7 @@ class Machine:
             State.IDLE: self._tick_idle,
             State.WATCHING: self._tick_watching,
             State.OPENING: self._tick_opening,
+            State.VERIFYING: self._tick_verifying,
             State.FEEDING: self._tick_feeding,
             State.CLOSING: self._tick_closing,
             State.COOLDOWN: self._tick_cooldown,
@@ -224,6 +227,10 @@ class Machine:
         self.store.set("last_open_at", now.isoformat())
         self.store.set("grrr_last_seen_at", now.isoformat())
         self.store.set("feeds_this_window", self.store.get_int("feeds_this_window") + 1)
+        # Reset the verify counters for this feeding session (one initial open, no rotations yet).
+        self.store.set("verify_rotations", 0)
+        self.store.set("verify_empty_count", 0)
+        self.store.set("verify_started_at", now.isoformat())
         self.last_feeding_verdict = None
         self.last_llm_at = now
         event_id = self.store.add_event(
@@ -239,7 +246,112 @@ class Machine:
             frames,
         )
         self._notify(f"OPENED plate {plate} ({mode}): {trigger}. Loaded plates: {loaded}", event_id)
-        self._transition(State.FEEDING, "lid open", plate=plate)
+        if self.settings.VERIFY_FOOD:
+            self._transition(State.VERIFYING, "lid open, verifying food", plate=plate)
+        else:
+            self._transition(State.FEEDING, "lid open", plate=plate)
+
+    def _tick_verifying(self, now: datetime) -> None:
+        """Lid is open; confirm the served bowl actually has food before settling into FEEDING.
+
+        food -> FEEDING. Confirmed empty (VERIFY_EMPTY_CONFIRMATIONS in a row) -> close, rotate to
+        the next loaded plate and re-open, up to MAX_ROTATE_FOR_FOOD; out of plates/rotations ->
+        alert and CLOSING. unsure never rotates, and after VERIFY_TIMEOUT_S of not knowing we stop
+        second-guessing and feed, so a bad read can never starve Grrr or churn the whole tray.
+        """
+        opened_at = self._when("opened_at") or now
+        if now - opened_at >= timedelta(minutes=self.settings.FEEDING_MAX_MIN):
+            self._transition(State.CLOSING, "FEEDING_MAX_MIN reached while verifying")
+            self._tick_closing(now)
+            return
+        if not self._llm_due(now, self.settings.VERIFY_POLL_S):
+            return
+        self.judged_frames = self.frames.latest(3)
+        verdict = self.llm.verify_food(self.judged_frames)
+        self.last_llm_at = now
+        self.last_verdict = verdict
+        self.last_feeding_verdict = verdict
+        plate = self.store.get_int("feeding_plate", 0)
+
+        if verdict.bowl == "food":
+            self.store.set("verify_empty_count", 0)
+            self._transition(State.FEEDING, f"food confirmed on plate {plate}")
+            return
+
+        if verdict.bowl != "empty":  # unsure
+            self.store.set("verify_empty_count", 0)
+            started = self._when("verify_started_at") or opened_at
+            if now - started >= timedelta(seconds=self.settings.VERIFY_TIMEOUT_S):
+                self._transition(State.FEEDING, "food unverified (timed out), feeding anyway")
+            return
+
+        # Confirmed-ish empty: require consecutive reads so one misjudged frame can't rotate.
+        count = self.store.get_int("verify_empty_count") + 1
+        self.store.set("verify_empty_count", count)
+        if count < self.settings.VERIFY_EMPTY_CONFIRMATIONS:
+            return
+        self._handle_empty_plate(now, plate)
+
+    def _handle_empty_plate(self, now: datetime, plate: int) -> None:
+        rotations = self.store.get_int("verify_rotations")
+        # The served plate is empty — record it so it's not offered again (updates the dashboard).
+        if plate:
+            self.store.set_plate(plate, "empty", now)
+        others_loaded = [p for p in self.store.loaded_plates() if p != plate]
+        frames = self._save_frames("empty_plate")
+        if rotations >= self.settings.MAX_ROTATE_FOR_FOOD or not others_loaded:
+            reason = (
+                "served plate empty; rotation cap reached"
+                if rotations >= self.settings.MAX_ROTATE_FOR_FOOD
+                else "served plate empty; no other loaded plate to try"
+            )
+            event_id = self.store.add_event(
+                now, "empty_no_food", reason, {"plate": plate, "rotations": rotations}, frames
+            )
+            self._notify(f"EMPTY PLATE: {reason}. Closing. Check the feeder.", event_id)
+            self._transition(State.CLOSING, reason)
+            self._tick_closing(now)
+            return
+        try:
+            new_plate = self._reserve_next_loaded(now)
+        except FeederError as exc:
+            event_id = self.store.add_event(
+                now, "empty_no_food", f"re-serve failed: {exc}", {"plate": plate}, frames
+            )
+            self._notify(f"EMPTY PLATE and re-serve FAILED: {exc}. Closing.", event_id)
+            self._transition(State.CLOSING, "re-serve failed")
+            self._tick_closing(now)
+            return
+        self.store.set("verify_empty_count", 0)
+        self.store.set("verify_started_at", now.isoformat())
+        self.store.set("verify_rotations", rotations + 1)
+        event_id = self.store.add_event(
+            now,
+            "rotated_empty_plate",
+            f"plate {plate} empty -> rotated to plate {new_plate}",
+            {"from": plate, "to": new_plate, "rotations": rotations + 1},
+            frames,
+        )
+        self._notify(
+            f"Plate {plate} was empty; rotated to plate {new_plate} and re-opened.", event_id
+        )
+
+    def _reserve_next_loaded(self, now: datetime) -> int:
+        """Close the empty plate, rotate to the next still-loaded plate, and open it. The lid is
+        open on an empty plate when this is called; closing first keeps the tray movement safe."""
+        feeder = self._feeder()
+        feeder.close()
+        self.store.set("lid_actual_open", 0)
+        plate = self._plate_under_lid(feeder)  # rotates (closed) to a loaded plate
+        feeder.open_now(plate)
+        self.store.set("lid_actual_open", 1)
+        self.store.set("current_plate", plate)
+        self.store.set("feeding_plate", plate)
+        # Reset the feeding clock to this plate; this is a correction within the same session, so
+        # last_open_at and feeds_this_window are deliberately left untouched.
+        self.store.set("opened_at", now.isoformat())
+        self.store.set("grrr_last_seen_at", now.isoformat())
+        return plate
 
     def _tick_feeding(self, now: datetime) -> None:
         opened_at = self._when("opened_at") or now

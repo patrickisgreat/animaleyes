@@ -74,6 +74,11 @@ class CascadeIdentifier:
         # for free; the identity was already settled when the lid opened.
         return self.gate.feeding_check(frames)
 
+    def verify_food(self, frames: list[Frame]) -> FeedingVerdict:
+        # Judging whether the served bowl has food needs real vision — route it to Claude
+        # (YOLO can't see food). This runs only while a plate is being verified, so it's rare.
+        return self.confirm.verify_food(frames)
+
     def reload_references(self) -> None:
         if hasattr(self.confirm, "reload_references"):
             self.confirm.reload_references()
