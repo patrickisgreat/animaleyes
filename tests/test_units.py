@@ -352,3 +352,77 @@ def test_theme_store_crud_and_validation(tmp_path) -> None:
     # Delete.
     store.delete(t.id)
     assert store.load() == []
+
+
+def test_camera_pump_reconnects_on_a_stalled_stream(tmp_path) -> None:
+    """A camera whose socket stays open but stops sending frames must not hang forever: the
+    pump raises after stall_s so run()'s reconnect kicks in."""
+    import os
+    import time as _t
+
+    from animaleyes.camera import Camera, FrameBuffer
+    from animaleyes.config import Secrets
+
+    r, w = os.pipe()
+    rf = os.fdopen(r, "rb", buffering=0)
+    cam = Camera(Secrets.from_env(), FrameBuffer(), stall_s=0.3)
+    start = _t.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="no camera frames"):
+            cam._pump(rf)
+    finally:
+        rf.close()
+        os.close(w)
+    assert _t.monotonic() - start < 3  # bailed promptly, didn't hang
+
+
+def test_camera_pump_pushes_frames_then_reports_eof() -> None:
+    """Normal path: JPEGs on the pipe become frames; a closed stream returns (EOF -> reconnect)."""
+    import os
+
+    from animaleyes.camera import Camera, FrameBuffer
+    from animaleyes.config import Secrets
+
+    tiny = bytes.fromhex("ffd8") + b"x" + bytes.fromhex("ffd9")
+    r, w = os.pipe()
+    rf = os.fdopen(r, "rb", buffering=0)
+    os.write(w, tiny + tiny)
+    os.close(w)  # EOF after the two frames
+    buf = FrameBuffer()
+    cam = Camera(Secrets.from_env(), buf, stall_s=5)
+    try:
+        cam._pump(rf)  # returns on EOF (no raise inside _pump)
+    finally:
+        rf.close()
+    assert len(buf.latest(5)) == 2
+
+
+def test_email_notifier_enabled_flag_and_routine_is_silent() -> None:
+    from animaleyes.notify import EmailNotifier
+
+    off = EmailNotifier("", 587, "", "", "", [])
+    assert off.enabled is False
+    off.alert("x")  # disabled: no SMTP, no raise
+    off.send("x")
+
+    on = EmailNotifier("smtp.example.com", 587, "u", "p", "u@x.com", ["a@b.com"])
+    assert on.enabled is True
+    on.send("routine")  # routine never emails (no SMTP attempted), must not raise
+
+
+def test_multinotifier_fans_out_and_survives_a_bad_channel() -> None:
+    from animaleyes.notify import LogNotifier, MultiNotifier
+
+    class Boom:
+        def send(self, t):
+            raise RuntimeError("down")
+
+        def alert(self, t):
+            raise RuntimeError("down")
+
+    sink = LogNotifier()
+    m = MultiNotifier([Boom(), sink])
+    m.send("hi")
+    m.alert("oops")
+    assert "hi" in sink.sent
+    assert "oops" in sink.alerts

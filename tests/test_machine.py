@@ -503,3 +503,16 @@ def test_verify_off_opens_straight_to_feeding(h: Harness) -> None:
     confirm_grrr(h)
     assert h.state() == "FEEDING"
     assert h.llm.verify_calls == 0
+
+
+def test_feed_failure_sends_an_urgent_alert(h: Harness) -> None:
+    h.feeder.fail_open = True
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert any("FEED FAILED" in a for a in h.notifier.alerts)
+
+
+def test_camera_offline_sends_an_urgent_alert(h: Harness) -> None:
+    h.clock.advance(seconds=61)  # no frames pushed -> camera considered offline
+    h.machine.tick()
+    assert any("CAMERA OFFLINE" in a for a in h.notifier.alerts)

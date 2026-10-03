@@ -11,6 +11,7 @@ import base64
 import concurrent.futures
 import ipaddress
 import logging
+import select
 import socket
 import subprocess
 import threading
@@ -29,6 +30,7 @@ log = logging.getLogger(__name__)
 JPEG_START = b"\xff\xd8"
 JPEG_END = b"\xff\xd9"
 FRAME_WIDTH = 640  # keeps LLM image tokens low; the bowl area stays legible
+CAMERA_STALL_S = 20.0  # no bytes from ffmpeg for this long = stalled stream; reconnect
 
 
 @dataclass(frozen=True)
@@ -178,6 +180,7 @@ class Camera(threading.Thread):
         on_frame: Callable[[Frame], None] | None = None,
         clock: Callable[[], datetime] = datetime.now,
         fps: int = 2,
+        stall_s: float = CAMERA_STALL_S,
     ):
         super().__init__(name="camera", daemon=True)
         self.secrets = secrets
@@ -185,6 +188,7 @@ class Camera(threading.Thread):
         self.on_frame = on_frame
         self.clock = clock
         self.fps = max(1, fps)
+        self.stall_s = max(1.0, stall_s)
         self.stop_event = threading.Event()
         self.last_error: str | None = None
 
@@ -208,18 +212,8 @@ class Camera(threading.Thread):
         cmd = build_ffmpeg_command(self.secrets, fps=self.fps)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert proc.stdout is not None
-        pending = bytearray()
         try:
-            while not self.stop_event.is_set():
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                pending += chunk
-                for jpeg in split_jpegs(pending):
-                    frame = Frame(jpeg=jpeg, at=self.clock())
-                    self.buffer.push(frame)
-                    if self.on_frame:
-                        self.on_frame(frame)
+            self._pump(proc.stdout)
         finally:
             proc.kill()
             stderr = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
@@ -227,6 +221,32 @@ class Camera(threading.Thread):
         if stderr:
             raise RuntimeError(f"ffmpeg exited: {stderr[-500:]}")
         raise RuntimeError("ffmpeg stream ended")
+
+    def _pump(self, stdout) -> None:
+        """Read JPEGs off ffmpeg's stdout, pushing frames. Raises if the stream ends OR stalls.
+
+        A camera whose RTSP socket stays open but stops sending data (seen in the wild) would
+        block a plain read() forever, so the camera never reconnects and feeding silently stops.
+        select() with a tick lets us notice no bytes have arrived for `stall_s` and bail, which
+        bubbles up to run()'s reconnect-with-backoff."""
+        pending = bytearray()
+        last_data = time.monotonic()
+        tick = min(1.0, self.stall_s)
+        while not self.stop_event.is_set():
+            ready, _, _ = select.select([stdout], [], [], tick)
+            if ready:
+                chunk = stdout.read1(65536) if hasattr(stdout, "read1") else stdout.read(65536)
+                if not chunk:
+                    return  # EOF: ffmpeg exited; _stream_once reports why and reconnects
+                last_data = time.monotonic()
+                pending += chunk
+                for jpeg in split_jpegs(pending):
+                    frame = Frame(jpeg=jpeg, at=self.clock())
+                    self.buffer.push(frame)
+                    if self.on_frame:
+                        self.on_frame(frame)
+            elif time.monotonic() - last_data > self.stall_s:
+                raise RuntimeError(f"no camera frames for {self.stall_s:.0f}s; reconnecting")
 
     def stop(self) -> None:
         self.stop_event.set()

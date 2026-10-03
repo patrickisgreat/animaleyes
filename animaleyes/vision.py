@@ -58,6 +58,7 @@ Rules:
 - "at_bowl" is true only when the animal's head is at or in the bowl area, not merely nearby.
 - Answer with a single JSON object matching the schema you were given, nothing else."""
 
+
 def identify_schema(keys: list[str]) -> dict[str, Any]:
     return {
         "type": "object",
@@ -117,6 +118,7 @@ def verify_question(target_name: str) -> str:
         "'unsure' — do NOT guess 'empty', because that would rotate the tray and waste a good "
         f"plate. Set grrr_at_bowl true if {target_name} is eating from it."
     )
+
 
 # USD per million tokens: (input, output). Cache writes with a 1h TTL cost 2x input,
 # cache reads cost 0.1x input. Used for the dashboard estimate only.

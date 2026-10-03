@@ -216,7 +216,7 @@ class Machine:
             event_id = self.store.add_event(
                 now, "feed_failed", str(exc), {"trigger": trigger, "mode": mode}, frames
             )
-            self._notify(f"FEED FAILED ({mode}): {exc}", event_id)
+            self._notify(f"FEED FAILED ({mode}): {exc}", event_id, urgent=True)
             self._transition(State.IDLE, "feed failed", error=str(exc))
             return
         self.store.set("feed_failed_at", None)
@@ -308,7 +308,9 @@ class Machine:
             event_id = self.store.add_event(
                 now, "empty_no_food", reason, {"plate": plate, "rotations": rotations}, frames
             )
-            self._notify(f"EMPTY PLATE: {reason}. Closing. Check the feeder.", event_id)
+            self._notify(
+                f"EMPTY PLATE: {reason}. Closing. Check the feeder.", event_id, urgent=True
+            )
             self._transition(State.CLOSING, reason)
             self._tick_closing(now)
             return
@@ -318,7 +320,7 @@ class Machine:
             event_id = self.store.add_event(
                 now, "empty_no_food", f"re-serve failed: {exc}", {"plate": plate}, frames
             )
-            self._notify(f"EMPTY PLATE and re-serve FAILED: {exc}. Closing.", event_id)
+            self._notify(f"EMPTY PLATE and re-serve FAILED: {exc}. Closing.", event_id, urgent=True)
             self._transition(State.CLOSING, "re-serve failed")
             self._tick_closing(now)
             return
@@ -413,7 +415,7 @@ class Machine:
         frames = self._save_frames("close")
         if error:
             event_id = self.store.add_event(now, "close_failed", error, data, frames)
-            self._notify(f"CLOSE FAILED after {session_s}s: {error}", event_id)
+            self._notify(f"CLOSE FAILED after {session_s}s: {error}", event_id, urgent=True)
         else:
             event_id = self.store.add_event(now, "close", f"bowl {bowl}", data, frames)
             self._notify(
@@ -599,11 +601,12 @@ class Machine:
             names.append(name)
         return names
 
-    def _notify(self, text: str, event_id: int | None = None) -> None:
+    def _notify(self, text: str, event_id: int | None = None, urgent: bool = False) -> None:
         # No credentials in the link; the browser asks for the dashboard's basic auth.
         if event_id and self.dashboard_url:
             text = f"{text}\n{self.dashboard_url}/events/{event_id}"
-        self.notifier.send(text)
+        # urgent -> email/SMS too; routine -> Slack/log only (keeps the phone quiet).
+        self.notifier.alert(text) if urgent else self.notifier.send(text)
 
     def _check_camera(self, now: datetime) -> None:
         last = self.frames.last_frame_at() or self.started_at
@@ -613,7 +616,7 @@ class Machine:
             event_id = self.store.add_event(
                 now, "camera_offline", f"no frame for {CAMERA_OFFLINE_S}s"
             )
-            self._notify("CAMERA OFFLINE: no frames", event_id)
+            self._notify("CAMERA OFFLINE: no frames", event_id, urgent=True)
         elif not offline and self.camera_offline:
             self.camera_offline = False
             event_id = self.store.add_event(now, "camera_online", "frames resumed")

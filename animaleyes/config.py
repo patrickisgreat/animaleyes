@@ -164,6 +164,13 @@ class Secrets:
     dash_password: str
     dash_public_url: str
     kasa_camera_mac: str = ""
+    # Email/SMS alerts (optional). SMS = email a carrier gateway address (see .env.example).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    alert_to: str = ""  # comma-separated email and/or carrier-SMS addresses
 
     @classmethod
     def from_env(cls) -> Secrets:
@@ -179,4 +186,13 @@ class Secrets:
             dash_password=env("DASH_PASSWORD", ""),
             dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8081").rstrip("/"),
             kasa_camera_mac=env("KASA_CAMERA_MAC", ""),
+            smtp_host=env("SMTP_HOST", ""),
+            smtp_port=int(env("SMTP_PORT", "587") or "587"),
+            smtp_user=env("SMTP_USER", ""),
+            smtp_password=env("SMTP_PASSWORD", ""),
+            smtp_from=env("SMTP_FROM", ""),
+            alert_to=env("ALERT_TO", ""),
         )
+
+    def alert_recipients(self) -> list[str]:
+        return [r.strip() for r in self.alert_to.split(",") if r.strip()]

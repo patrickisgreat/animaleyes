@@ -23,7 +23,7 @@ from .events import ReolinkEvents
 from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
-from .notify import SlackNotifier
+from .notify import EmailNotifier, MultiNotifier, SlackNotifier
 from .personas import PersonaStore
 from .ptz import Ptz
 from .store import Store
@@ -144,6 +144,21 @@ def build(
     except FeederError as exc:
         log.warning("real feeder unavailable: %s", exc)
         feeder = UnavailableFeeder(str(exc))  # type: ignore[assignment]
+    # Slack/log always present (it logs when no webhook); email/SMS added when SMTP is set, so
+    # offline/failure alerts reach the phone even with the dashboard closed.
+    email = EmailNotifier(
+        secrets.smtp_host,
+        secrets.smtp_port,
+        secrets.smtp_user,
+        secrets.smtp_password,
+        secrets.smtp_from,
+        secrets.alert_recipients(),
+    )
+    channels = [SlackNotifier(secrets.slack_webhook)]
+    if email.enabled:
+        channels.append(email)
+        log.info("alerts: email/SMS enabled to %s", secrets.alert_recipients())
+    notifier = MultiNotifier(channels)
     machine = Machine(
         config=config,
         store=store,
@@ -152,7 +167,7 @@ def build(
         llm=llm,
         feeder=feeder,
         dry_feeder=DryRunFeeder(),
-        notifier=SlackNotifier(secrets.slack_webhook),
+        notifier=notifier,
         clock=datetime.now,
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
@@ -172,7 +187,7 @@ def run_loop(machine: Machine, stop: threading.Event) -> None:
             log.exception("tick failed")
             if time.monotonic() - last_error_at > LOOP_ERROR_REPEAT_S:
                 last_error_at = time.monotonic()
-                machine.notifier.send("animaleyes loop error, see logs")
+                machine.notifier.alert("animaleyes loop error, see logs")
         stop.wait(TICK_S)
 
 
