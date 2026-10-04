@@ -9,13 +9,26 @@ class _Fake:
         self.verdict = verdict
         self.calls = 0
         self.reference_counts = {}
+        self.feeding = FeedingVerdict(grrr_at_bowl=True)
 
     def identify(self, frames):
         self.calls += 1
         return self.verdict
 
     def feeding_check(self, frames):
-        return FeedingVerdict(grrr_at_bowl=True)
+        self.feeding_calls = getattr(self, "feeding_calls", 0) + 1
+        return self.feeding
+
+
+def _blind_cascade(tmp_path, confirm_verdict, **settings):
+    from animaleyes.config import ConfigStore
+
+    cfg = ConfigStore(tmp_path / "c.toml")
+    cfg.update({"COLLECT_TRAINING": False, **settings})
+    clock = [0.0]
+    gate = _Fake(Verdict(animal="none"))
+    confirm = _Fake(confirm_verdict)
+    return CascadeIdentifier(gate, confirm, config=cfg, monotonic=lambda: clock[0]), confirm, clock
 
 
 def test_cat_is_decided_locally_without_calling_claude():
@@ -81,3 +94,48 @@ def test_cascade_does_not_save_low_confidence(tmp_path):
     )
     c.identify([Frame(jpeg=b"\xff\xd8x\xff\xd9", at=datetime(2026, 10, 2, 21, 0, 0))])
     assert not (tdir / "grrr").exists() or not list((tdir / "grrr").glob("*.jpg"))
+
+
+def test_blind_gate_still_gets_grrr_confirmed_quickly(tmp_path):
+    """Tight framing: a dog filling the frame is "nothing" to the gate. Claude must get a look,
+    and keep answering once it has seen her, so two confirmations land back to back."""
+    c, confirm, clock = _blind_cascade(tmp_path, Verdict(animal="grrr", confidence=0.9))
+    assert c.identify([]).animal == "grrr"  # first check of the visit probes straight away
+    clock[0] = 3
+    assert c.identify([]).animal == "grrr"  # sticky: gate still blind, Claude answers again
+    assert confirm.calls == 2
+
+
+def test_blind_gate_probes_are_throttled_when_nothing_is_there(tmp_path):
+    c, confirm, clock = _blind_cascade(tmp_path, Verdict(animal="none"), CASCADE_PROBE_S=10)
+    for t in (0, 3, 6, 9):
+        clock[0] = t
+        assert c.identify([]).animal == "none"
+    assert confirm.calls == 1  # one look, then quiet until the next probe is due
+    clock[0] = 12
+    c.identify([])
+    assert confirm.calls == 2
+
+
+def test_probing_can_be_turned_off(tmp_path):
+    c, confirm, _ = _blind_cascade(
+        tmp_path, Verdict(animal="grrr", confidence=0.9), CASCADE_PROBE_S=0
+    )
+    assert c.identify([]).animal == "none"
+    assert confirm.calls == 0
+
+
+def test_feeding_presence_falls_back_to_claude_when_the_gate_cannot_see_her():
+    gate = _Fake(Verdict(animal="none"))
+    gate.feeding = FeedingVerdict(grrr_at_bowl=False, reason="no animal detected")
+    confirm = _Fake(Verdict(animal="grrr"))
+    confirm.feeding = FeedingVerdict(grrr_at_bowl=True, bowl="food", reason="head in bowl")
+    v = CascadeIdentifier(gate, confirm).feeding_check([])
+    assert v.grrr_at_bowl is True and v.bowl == "food"
+
+
+def test_feeding_presence_stays_free_when_the_gate_sees_her():
+    gate = _Fake(Verdict(animal="grrr"))
+    confirm = _Fake(Verdict(animal="grrr"))
+    CascadeIdentifier(gate, confirm).feeding_check([])
+    assert getattr(confirm, "feeding_calls", 0) == 0

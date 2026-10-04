@@ -6,6 +6,12 @@ Bowie, and catching a cat that YOLO misread as a small dog). A cat or an empty s
 handled locally for free. In practice Claude runs only while a dog is in view (a handful of
 checks per visit) instead of on every motion, cutting cost while keeping Claude's accuracy.
 
+The gate can be blind: with the camera tight on the feeder, a dog filling the frame (or half
+out of it) often isn't recognised as a "dog" at all, and the visit used to go unanswered for
+minutes. So when the gate sees nothing, Claude still gets a look every CASCADE_PROBE_S while
+motion lasts, and once Claude has seen an animal the gate missed it keeps answering for
+CASCADE_STICKY_S so the confirmation streak isn't broken by the gate's "nothing".
+
 Every confident Claude dog verdict also saves the judged frame to data/training/<animal>/,
 pre-labelled, so a classifier that eventually replaces Claude trains itself from real IR frames.
 """
@@ -14,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .camera import Frame
@@ -29,24 +36,52 @@ class CascadeIdentifier:
         confirm: Identifier,
         config=None,
         training_dir: Path | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ):
         self.gate = gate  # local YOLO
         self.confirm = confirm  # Claude
         self.config = config
         self.training_dir = training_dir
+        self.monotonic = monotonic
         self.reference_counts: dict[str, int] = getattr(confirm, "reference_counts", {})
         self._last_saved = 0.0
+        self._last_confirm_at: float | None = None
+        self._last_confirm_saw_animal = False
 
     def identify(self, frames: list[Frame]) -> Verdict:
         v = self.gate.identify(frames)
         # YOLO sees a dog (grrr/bowie by its rough size guess) → ask Claude who it really is.
         if v.animal in ("grrr", "bowie"):
-            log.debug("cascade: dog seen locally, confirming with Claude")
-            v = self.confirm.identify(frames)
-            self._maybe_collect(v, frames)
-            return v
-        # Cat or nothing → decided locally, no paid call.
+            log.info("cascade: gate sees a dog -> asking Claude who it is")
+            return self._confirm(frames)
+        # The gate sees nothing, but identify() only runs while something is moving at the
+        # bowl — so it may simply be blind. Let Claude look, on a throttle.
+        if v.animal == "none" and self._probe_due():
+            log.info("cascade: gate sees nothing during motion -> letting Claude look")
+            return self._confirm(frames)
+        # Cat, or nothing and not due for a probe → decided locally, no paid call.
+        log.info("cascade: decided locally: %s (%s)", v.animal, v.reason)
         return v
+
+    def _confirm(self, frames: list[Frame]) -> Verdict:
+        v = self.confirm.identify(frames)
+        self._last_confirm_at = self.monotonic()
+        self._last_confirm_saw_animal = v.animal not in ("none", "unsure")
+        self._maybe_collect(v, frames)
+        return v
+
+    def _probe_due(self) -> bool:
+        if self.config is None:
+            return False
+        s = self.config.load()
+        if s.CASCADE_PROBE_S <= 0:
+            return False  # probing off: the gate alone decides (cheapest, can miss close-ups)
+        if self._last_confirm_at is None:
+            return True
+        since = self.monotonic() - self._last_confirm_at
+        if self._last_confirm_saw_animal and since <= s.CASCADE_STICKY_S:
+            return True  # Claude just saw an animal the gate can't: stay with Claude
+        return since >= s.CASCADE_PROBE_S
 
     def _maybe_collect(self, verdict: Verdict, frames: list[Frame]) -> None:
         if self.training_dir is None or not frames or self.config is None:
@@ -70,9 +105,14 @@ class CascadeIdentifier:
             log.warning("could not save training frame: %s", exc)
 
     def feeding_check(self, frames: list[Frame]) -> FeedingVerdict:
-        # Presence/absence during a feed only needs "is a dog still there", which YOLO does
-        # for free; the identity was already settled when the lid opened.
-        return self.gate.feeding_check(frames)
+        # If the gate plainly sees Grrr, that is enough and free. Otherwise it may be blind
+        # (frame-filling close-up, dog at the frame edge), and "absent" closes the lid on her —
+        # so Claude decides, which also restores bowl state and other-animal detection while
+        # the lid is open, the period that matters most.
+        v = self.gate.feeding_check(frames)
+        if v.grrr_at_bowl:
+            return v
+        return self.confirm.feeding_check(frames)
 
     def verify_food(self, frames: list[Frame]) -> FeedingVerdict:
         # Judging whether the served bowl has food needs real vision — route it to Claude

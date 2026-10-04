@@ -23,6 +23,7 @@ export const EVENTS: Record<string, [string, string]> = {
   camera_offline: ["📵", "Camera offline"], camera_online: ["📶", "Camera back online"],
   plates_set: ["🥣", "Plates updated"], grrr_blocked: ["⏳", "Grrr seen, not fed yet"],
   manual_open: ["🖐️", "Opened by hand"], manual_close: ["🖐️", "Closed by hand"],
+  manual_close_noop: ["⚠️", "Close not sent — feeder says it's already closed"],
   manual_rotate: ["🔄", "Rotated by hand"], manual_open_failed: ["⚠️", "Manual open failed"],
   manual_close_failed: ["⚠️", "Manual close failed"], manual_rotate_failed: ["⚠️", "Manual rotate failed"],
   config: ["⚙️", "Settings changed"],
