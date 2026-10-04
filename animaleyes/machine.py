@@ -65,6 +65,7 @@ class Machine:
         events=None,
         capture_gate: Identifier | None = None,
         capture_dir: Path | None = None,
+        healthcheck: Callable[[], None] | None = None,
     ):
         self.config = config
         self.store = store
@@ -78,6 +79,9 @@ class Machine:
         self.clock = clock
         self.frames_dir = frames_dir
         self.dashboard_url = dashboard_url
+        # Dead-man's-switch ping (injected, best-effort). Fired each heartbeat so an external
+        # monitor alerts if the loop stops, the process dies, or the box/network goes down.
+        self.healthcheck = healthcheck
         # Capture mode: a free local detector + the unlabelled-frame directory. Both may be
         # None (no local detector available), in which case capture mode quietly does nothing.
         self.capture_gate = capture_gate
@@ -634,6 +638,13 @@ class Machine:
             f"feeds={status['feeds_this_window']} "
             f"camera={'OFFLINE' if self.camera_offline else 'ok'}"
         )
+        # Tell the external dead-man's-switch we're alive. Best-effort; if the box, loop, or
+        # network is down these pings stop and the external monitor is what alerts the human.
+        if self.healthcheck:
+            try:
+                self.healthcheck()
+            except Exception as exc:  # noqa: BLE001 - monitoring must never affect feeding
+                log.debug("healthcheck ping failed: %s", exc)
 
     def _poll_lid(self, now: datetime) -> None:
         """Read the feeder's real lid state so the dashboard reflects opens done out-of-band

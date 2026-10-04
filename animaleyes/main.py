@@ -23,7 +23,7 @@ from .events import ReolinkEvents
 from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
-from .notify import EmailNotifier, MultiNotifier, SlackNotifier
+from .notify import EmailNotifier, MultiNotifier, PushoverNotifier, SlackNotifier
 from .personas import PersonaStore
 from .ptz import Ptz
 from .store import Store
@@ -118,6 +118,20 @@ def capture_gate(llm, config: ConfigStore):
         return None
 
 
+def _healthcheck(url: str):
+    """A best-effort GET to a dead-man's-switch URL (e.g. healthchecks.io), or None if unset.
+    The external monitor alerts when these stop — the one path that survives the box going down."""
+    if not url:
+        return None
+    import urllib.request
+
+    def ping() -> None:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            resp.read()
+
+    return ping
+
+
 def build(
     secrets: Secrets,
 ) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None, PersonaStore]:
@@ -158,6 +172,10 @@ def build(
     if email.enabled:
         channels.append(email)
         log.info("alerts: email/SMS enabled to %s", secrets.alert_recipients())
+    pushover = PushoverNotifier(secrets.pushover_token, secrets.pushover_user)
+    if pushover.enabled:
+        channels.append(pushover)
+        log.info("alerts: Pushover emergency alerts enabled")
     notifier = MultiNotifier(channels)
     machine = Machine(
         config=config,
@@ -174,6 +192,7 @@ def build(
         events=events,
         capture_gate=capture_gate(llm, config),
         capture_dir=DATA_DIR / "training" / "unlabeled",
+        healthcheck=_healthcheck(secrets.healthcheck_url),
     )
     return machine, camera, config, store, llm, events, personas
 

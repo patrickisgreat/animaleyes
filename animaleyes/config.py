@@ -171,6 +171,9 @@ class Secrets:
     smtp_password: str = ""
     smtp_from: str = ""
     alert_to: str = ""  # comma-separated email and/or carrier-SMS addresses
+    pushover_token: str = ""  # Pushover app token (emergency-priority wake-me alerts)
+    pushover_user: str = ""  # Pushover user/group key
+    healthcheck_url: str = ""  # dead-man's-switch: pinged each heartbeat; alerts if pings stop
 
     @classmethod
     def from_env(cls) -> Secrets:
@@ -192,6 +195,9 @@ class Secrets:
             smtp_password=env("SMTP_PASSWORD", ""),
             smtp_from=env("SMTP_FROM", ""),
             alert_to=env("ALERT_TO", ""),
+            pushover_token=env("PUSHOVER_TOKEN", ""),
+            pushover_user=env("PUSHOVER_USER", ""),
+            healthcheck_url=env("HEALTHCHECK_URL", ""),
         )
 
     def alert_recipients(self) -> list[str]:

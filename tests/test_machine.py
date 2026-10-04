@@ -516,3 +516,11 @@ def test_camera_offline_sends_an_urgent_alert(h: Harness) -> None:
     h.clock.advance(seconds=61)  # no frames pushed -> camera considered offline
     h.machine.tick()
     assert any("CAMERA OFFLINE" in a for a in h.notifier.alerts)
+
+
+def test_heartbeat_pings_the_dead_mans_switch(h: Harness) -> None:
+    pings: list[int] = []
+    h.machine.healthcheck = lambda: pings.append(1)
+    h.load_plates(1)
+    h.tick()  # first tick fires the heartbeat
+    assert pings, "heartbeat should ping the external healthcheck"

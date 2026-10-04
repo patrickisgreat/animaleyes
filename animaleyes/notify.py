@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import smtplib
+import urllib.parse
 import urllib.request
 from email.message import EmailMessage
 from typing import Protocol
@@ -100,6 +101,56 @@ class EmailNotifier:
                 smtp.send_message(msg)
         except Exception as exc:  # noqa: BLE001 - a broken mail server must not stop feeding
             log.warning("email alert failed: %s", exc)
+
+
+class PushoverNotifier:
+    """Pushover push notifications. alert() uses Emergency priority (2): it repeats and overrides
+    the phone's silent/Do-Not-Disturb until acknowledged — the channel meant to actually wake you.
+    Routine send() is a no-op so only real problems push. Needs an app token + your user key."""
+
+    API = "https://api.pushover.net/1/messages.json"
+
+    def __init__(
+        self,
+        token: str,
+        user: str,
+        timeout_s: float = 10.0,
+        retry_s: int = 60,
+        expire_s: int = 3600,
+    ):
+        self.token = token
+        self.user = user
+        self.timeout_s = timeout_s
+        self.retry_s = max(30, retry_s)  # Pushover requires retry >= 30s
+        self.expire_s = min(10800, expire_s)  # and expire <= 3h
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.token and self.user)
+
+    def _payload(self, text: str) -> dict[str, str | int]:
+        return {
+            "token": self.token,
+            "user": self.user,
+            "title": "animaleyes",
+            "message": text[:1024],
+            "priority": 2,  # emergency: repeat until acknowledged
+            "retry": self.retry_s,
+            "expire": self.expire_s,
+        }
+
+    def send(self, text: str) -> None:
+        pass  # routine chatter should not push
+
+    def alert(self, text: str) -> None:
+        if not self.enabled:
+            return
+        body = urllib.parse.urlencode(self._payload(text)).encode("utf-8")
+        try:
+            with urllib.request.urlopen(self.API, data=body, timeout=self.timeout_s) as resp:
+                resp.read()
+        except Exception as exc:  # noqa: BLE001 - a broken push service must not stop feeding
+            log.warning("pushover alert failed: %s", exc)
 
 
 class MultiNotifier:

@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Button, Card, useToast } from "../lib/ui";
 
-type Ctl = { key: string; label: string; type: "bool" | "number" | "text" | "select"; group: string; opts?: string[] };
+type Ctl = { key: string; label: string; type: "bool" | "number" | "text" | "time" | "select"; group: string; opts?: string[] };
 const CONTROLS: Ctl[] = [
   { key: "ENABLED", label: "Enabled", type: "bool", group: "Schedule" },
-  { key: "ACTIVE_START", label: "Active from", type: "text", group: "Schedule" },
-  { key: "ACTIVE_END", label: "Active until", type: "text", group: "Schedule" },
+  { key: "ACTIVE_START", label: "Active from", type: "time", group: "Schedule" },
+  { key: "ACTIVE_END", label: "Active until", type: "time", group: "Schedule" },
   { key: "DRY_RUN", label: "Dry run (don't move feeder)", type: "bool", group: "Schedule" },
   { key: "IDENTIFIER", label: "Detector", type: "select", group: "Identification", opts: ["cascade", "yolo", "claude"] },
   { key: "GRRR_MIN_CONF", label: "Min confidence for Grrr", type: "number", group: "Identification" },
@@ -72,6 +72,8 @@ export function Settings() {
                     <select className="input" value={String(cfg[c.key])} onChange={(e) => set(c.key, e.target.value)}>
                       {c.opts!.map((o) => <option key={o}>{o}</option>)}
                     </select>
+                  ) : c.type === "time" ? (
+                    <input className="input" type="time" value={String(cfg[c.key] ?? "")} onChange={(e) => set(c.key, e.target.value)} />
                   ) : (
                     <input className="input" type={c.type} step="any" value={String(cfg[c.key])} onChange={(e) => set(c.key, e.target.value)} />
                   )}

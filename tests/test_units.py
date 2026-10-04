@@ -426,3 +426,19 @@ def test_multinotifier_fans_out_and_survives_a_bad_channel() -> None:
     m.alert("oops")
     assert "hi" in sink.sent
     assert "oops" in sink.alerts
+
+
+def test_pushover_payload_is_emergency_priority() -> None:
+    from animaleyes.notify import PushoverNotifier
+
+    off = PushoverNotifier("", "")
+    assert off.enabled is False
+    off.alert("x")  # disabled: no HTTP, no raise
+
+    n = PushoverNotifier("tok", "usr", retry_s=10, expire_s=99999)
+    assert n.enabled is True
+    p = n._payload("camera offline")
+    assert p["priority"] == 2  # emergency: repeats until acknowledged
+    assert p["retry"] >= 30 and p["expire"] <= 10800  # clamped to Pushover's limits
+    assert p["message"] == "camera offline"
+    n.send("routine")  # routine never pushes, must not raise
