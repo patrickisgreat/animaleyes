@@ -28,12 +28,24 @@ export function LiveView({ s }: { s: Status | null }) {
   const [live, setLive] = useState(true);
 
   const start = () => { if (img.current) img.current.src = "/stream.mjpg?t=" + Date.now(); };
+  // iPhone Safari has no element fullscreen (only <video>), so the button used to do nothing
+  // there. Fall back to taking over the viewport with CSS wherever the real API is missing
+  // or refuses.
+  const [expanded, setExpanded] = useState(false);
   const fullscreen = () => {
     const el = box.current;
     if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen();
-    else el.requestFullscreen?.().catch(() => {});
+    if (document.fullscreenElement) { document.exitFullscreen(); return; }
+    if (expanded) { setExpanded(false); return; }
+    if (el.requestFullscreen) el.requestFullscreen().catch(() => setExpanded(true));
+    else setExpanded(true);
   };
+  useEffect(() => {
+    if (!expanded) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden"; // no page scroll behind the takeover
+    return () => { document.body.style.overflow = prev; };
+  }, [expanded]);
   useEffect(() => {
     if (live) start();
     const onVis = () => { if (live && !document.hidden) start(); };
@@ -51,7 +63,11 @@ export function LiveView({ s }: { s: Status | null }) {
     <Card>
       <div
         ref={box}
-        className="live-box relative rounded-xl overflow-hidden bg-black aspect-video"
+        className={
+          expanded
+            ? "live-box fixed inset-0 z-[55] overflow-hidden bg-black"
+            : "live-box relative rounded-xl overflow-hidden bg-black aspect-video"
+        }
       >
         <img
           ref={img}
@@ -68,7 +84,9 @@ export function LiveView({ s }: { s: Status | null }) {
           <button onClick={() => setLive((x) => !x)} className="btn btn-sm bg-black/60 backdrop-blur">
             {live ? "Pause" : "Resume"}
           </button>
-          <button onClick={fullscreen} className="btn btn-sm bg-black/60 backdrop-blur" title="fullscreen">⛶</button>
+          <button onClick={fullscreen} className="btn btn-sm bg-black/60 backdrop-blur" title="fullscreen">
+            {expanded ? "✕" : "⛶"}
+          </button>
         </div>
         <div className="absolute left-2.5 right-2.5 bottom-2.5 bg-black/70 backdrop-blur px-3 py-2 rounded-[10px]">
           <div className="font-bold text-sm">{v.who}</div>

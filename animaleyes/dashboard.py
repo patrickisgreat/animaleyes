@@ -64,6 +64,7 @@ MAIN_EVENT_KINDS = (
     "grrr_blocked",
     "manual_open",
     "manual_close",
+    "manual_close_noop",
     "manual_rotate",
     "manual_open_failed",
     "manual_close_failed",

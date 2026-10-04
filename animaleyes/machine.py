@@ -288,6 +288,10 @@ class Machine:
         self.last_verdict_at = now
         self.last_feeding_verdict = verdict
         plate = self.store.get_int("feeding_plate", 0)
+        if verdict.grrr_at_bowl:
+            # She is eating while we check the plate: that is presence, so the leave timer
+            # must not run from the moment the lid opened.
+            self.store.set("grrr_last_seen_at", now.isoformat())
 
         if verdict.bowl == "food":
             self.store.set("verify_empty_count", 0)
@@ -414,8 +418,9 @@ class Machine:
         # bowl is offered again. Wrongly advancing costs one bowl; wrongly staying starves.
         plate_status = "loaded" if bowl == "food" else "eaten"
         error = None
+        close_sent = True
         try:
-            feeder.close()
+            close_sent = feeder.close() is not False
         except FeederError as exc:
             error = str(exc)
         if plate:
@@ -428,15 +433,19 @@ class Machine:
             "session_s": session_s,
             "loaded_plates": self.store.loaded_plates(),
             "mode": "DRY_RUN" if self.settings.DRY_RUN else "LIVE",
+            # False = the feeder said no lid was open, so nothing was sent. Usually it closed
+            # itself; if the lid is in fact open, the feeder and its cloud are out of sync.
+            "close_sent": close_sent,
         }
         frames = self._save_frames("close")
         if error:
             event_id = self.store.add_event(now, "close_failed", error, data, frames)
             self._notify(f"CLOSE FAILED after {session_s}s: {error}", event_id, urgent=True)
         else:
-            event_id = self.store.add_event(now, "close", f"bowl {bowl}", data, frames)
+            how = "" if close_sent else " (feeder reported the lid already closed; nothing sent)"
+            event_id = self.store.add_event(now, "close", f"bowl {bowl}{how}", data, frames)
             self._notify(
-                f"CLOSED plate {plate} after {session_s}s, bowl {bowl} -> {plate_status}. "
+                f"CLOSED plate {plate} after {session_s}s, bowl {bowl} -> {plate_status}{how}. "
                 f"Loaded plates left: {self.store.loaded_plates()}",
                 event_id,
             )
@@ -780,7 +789,20 @@ class Machine:
                 self.store.set("lid_actual_open", 1)
                 detail = {"mode": mode, "plate": plate}
             elif action == "close":
-                feeder.close()
+                if feeder.close() is False:
+                    # Nothing was sent: the feeder reports no open lid. Say so instead of
+                    # "closed" — the human pressed Close because they can see it open.
+                    event_id = self.store.add_event(
+                        now,
+                        "manual_close_noop",
+                        "feeder reports the lid is already closed; no close command was sent",
+                        {"mode": mode},
+                        self._save_frames("manual_close_noop", self.frames.latest(1)),
+                    )
+                    self._notify(
+                        f"manual close NOT SENT ({mode}): feeder says already closed", event_id
+                    )
+                    return
                 self.store.set("lid_manual_open", None)
                 self.store.set("lid_actual_open", 0)
                 detail = {"mode": mode}

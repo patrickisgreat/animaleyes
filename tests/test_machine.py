@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from animaleyes.detect import Verdict
+from animaleyes.detect import FeedingVerdict, Verdict
 from tests.conftest import (
     BOWIE,
     CAT,
@@ -635,3 +635,39 @@ def test_watch_respects_interval_and_switch(tmp_path) -> None:
     h.config.update({"ALWAYS_WATCH": False})
     h.run(seconds=10, motion=False)
     assert h.capture_gate.identify_calls == 2
+
+
+def test_manual_close_says_so_when_nothing_was_sent(h: Harness) -> None:
+    """The feeder's cloud can report no open lid while the lid is physically open. A Close that
+    sent nothing must not be logged as a close."""
+    h.feeder.nothing_to_close = True
+    h.machine.request_manual_action("close")
+    h.tick(motion=False)
+    assert h.events("manual_close_noop")
+    assert not h.events("manual_close")
+    assert "close" not in h.feeder.calls
+
+
+def test_session_close_records_when_no_command_was_sent(h: Harness) -> None:
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    h.feeder.nothing_to_close = True
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=h.machine.settings.LEAVE_TIMEOUT_S + 30)
+    close = h.events("close")[0]
+    assert close.data["close_sent"] is False
+    assert "nothing sent" in close.reason
+
+
+def test_eating_during_plate_verification_counts_as_presence(h: Harness) -> None:
+    """Claude saying Grrr is at the bowl while the plate is being verified must hold the lid
+    open: the leave timer used to run from the moment of opening regardless."""
+    h.config.update({"VERIFY_TIMEOUT_S": 60, "LEAVE_TIMEOUT_S": 90})
+    h.llm.verify_result = FeedingVerdict(grrr_at_bowl=True, bowl="unsure", reason="dog hides bowl")
+    _open_with_verify(h, 1)
+    h.run(seconds=70)  # verification gives up after 60s -> FEEDING
+    assert h.state() == "FEEDING"
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=40)  # 110s after opening: past LEAVE_TIMEOUT from open, not from last seen
+    assert h.state() == "FEEDING"

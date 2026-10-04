@@ -12,6 +12,7 @@ const CONTROLS: Ctl[] = [
   { key: "GRRR_MIN_CONF", label: "Min confidence for Grrr", type: "number", group: "Identification" },
   { key: "CONFIRMATIONS_REQUIRED", label: "Confirmations before feeding", type: "number", group: "Identification" },
   { key: "OPEN_REQUIRES_AT_BOWL", label: "Require head-in-bowl to open", type: "bool", group: "Identification" },
+  { key: "CASCADE_PROBE_S", label: "Ask Claude when the local detector sees nothing, every (sec, 0 = never)", type: "number", group: "Identification" },
   { key: "MIN_GAP_MIN", label: "Min minutes between feeds", type: "number", group: "Feeding" },
   { key: "LEAVE_TIMEOUT_S", label: "Close after gone (sec)", type: "number", group: "Feeding" },
   { key: "FEEDING_MAX_MIN", label: "Max feeding length (min)", type: "number", group: "Feeding" },

@@ -29,7 +29,10 @@ class Feeder(Protocol):
     def current_plate(self) -> int: ...
     def rotate(self) -> None: ...
     def open_now(self, plate: int) -> None: ...
-    def close(self) -> None: ...
+    def close(self) -> bool:
+        """True if a close command was sent; False if the feeder reported no open lid."""
+        ...
+
     def manual_feed_active(self) -> bool: ...
 
 
@@ -98,14 +101,17 @@ class PetlibroCli:
                 return
             raise
 
-    def close(self) -> None:
+    def close(self) -> bool:
         try:
             self._run("close", self.serial, "--no-dry-run")
         except FeederError as exc:
             if "No active manual feed" in str(exc):
-                log.info("close: lid already closed")
-                return
+                # The cloud holds no open feed, so there is nothing to stop and nothing is sent.
+                # That is NOT proof the lid is shut: the cloud and the feeder can disagree.
+                log.warning("close: feeder reports no open lid; no close command sent")
+                return False
             raise
+        return True
 
 
 class DryRunFeeder:
@@ -129,10 +135,11 @@ class DryRunFeeder:
         self._open = True
         log.info("DRY_RUN open plate %d", plate)
 
-    def close(self) -> None:
+    def close(self) -> bool:
         self.calls.append("close")
         self._open = False
         log.info("DRY_RUN close")
+        return True
 
     def manual_feed_active(self) -> bool:
         return self._open
