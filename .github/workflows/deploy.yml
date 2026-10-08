@@ -1,0 +1,111 @@
+name: Deploy
+
+# Deploying means: bring the live checkout on the robot-computer box up to the commit CI just
+# passed on main, rebuild the image, and restart the container. Runs on the self-hosted runner
+# registered to this repo (tools/install-runner.sh), next to robot-computer's own runner.
+on:
+  # Every merge to main, but only once CI has passed on that exact commit.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Redeploy without a merge: a failed deploy, or rolling back to an older ref.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or SHA to deploy (default: main)'
+        required: false
+        default: 'main'
+
+# NEVER add pull_request here. A self-hosted runner executes the workflow from the
+# triggering ref, so a pull_request trigger lets anyone who can open a PR run code on the
+# box that holds the feeder login and the camera. workflow_run always uses main's copy of
+# this file, and the `if` below only accepts CI runs that came from a push to main.
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-animaleyes
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: animaleyes
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: [self-hosted, animaleyes]
+    timeout-minutes: 40
+    env:
+      # The live checkout docker compose runs from (config/, data/ and .env live here).
+      # Deliberately not the runner's _work clone.
+      DEPLOY_DIR: /home/pb/code/animaleyes
+      # Deploy exactly the commit CI tested, not whatever main is by the time we get here.
+      REF: ${{ github.event.workflow_run.head_sha || github.event.inputs.ref }}
+    steps:
+      - name: Refuse to deploy over uncommitted work
+        run: |
+          cd "$DEPLOY_DIR"
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::$DEPLOY_DIR has uncommitted changes. Deploying would discard"
+            echo "::error::or conflict with them. Commit or stash on the box, then re-run."
+            git status --short
+            exit 1
+          fi
+
+      # A restart mid-feed is safe (it resumes FEEDING with the lid assumed open), but there
+      # is no reason to interrupt dinner for a deploy. Wait for the lid to close; a session is
+      # capped at FEEDING_MAX_MIN (15) so this ends on its own.
+      - name: Wait until the feeder is not mid-feed
+        run: |
+          state() {
+            docker exec animaleyes python -c "import sqlite3; r = sqlite3.connect('data/db/animaleyes.sqlite').execute(\"select value from kv where key='state'\").fetchone(); print(r[0] if r else 'IDLE')" 2>/dev/null || echo NOT_RUNNING
+          }
+          for _ in $(seq 1 50); do
+            s="$(state)"
+            case "$s" in
+              OPENING|VERIFYING|FEEDING|CLOSING) echo "state $s, waiting for the lid to close"; sleep 30 ;;
+              *) echo "state $s, ok to deploy"; exit 0 ;;
+            esac
+          done
+          echo "::error::still mid-feed after 25 minutes; not deploying. Check the dashboard."
+          exit 1
+
+      - name: Fetch and check out ${{ env.REF }}
+        run: |
+          cd "$DEPLOY_DIR"
+          git fetch --prune --tags origin
+          git checkout --detach "origin/$REF" 2>/dev/null || git checkout --detach "$REF"
+          echo "now at $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
+
+      - name: Build and restart
+        run: |
+          cd "$DEPLOY_DIR"
+          docker compose up -d --build
+          # Old images pile up one per deploy (torch makes them big); keep the disk sane.
+          docker image prune -f
+
+      # Started is not deployed. The container's own healthcheck fails if the state-machine
+      # loop stops ticking, so wait for "healthy", then check again a minute later to catch a
+      # crash loop that a single look would miss.
+      - name: Confirm healthy, and still healthy a minute later
+        run: |
+          health() { docker inspect -f '{{.State.Health.Status}}' animaleyes 2>/dev/null || echo missing; }
+          for _ in $(seq 1 24); do
+            [ "$(health)" = healthy ] && break
+            sleep 10
+          done
+          if [ "$(health)" != healthy ]; then
+            echo "::error::animaleyes is $(health) four minutes after the deploy"
+            docker compose -f "$DEPLOY_DIR/docker-compose.yml" logs --tail 60 animaleyes
+            exit 1
+          fi
+          restarts="$(docker inspect -f '{{.RestartCount}}' animaleyes)"
+          sleep 60
+          if [ "$(health)" != healthy ] || [ "$(docker inspect -f '{{.RestartCount}}' animaleyes)" != "$restarts" ]; then
+            echo "::error::animaleyes went unhealthy or restarted within a minute of the deploy"
+            docker compose -f "$DEPLOY_DIR/docker-compose.yml" logs --tail 60 animaleyes
+            exit 1
+          fi
+          echo "healthy at $(git -C "$DEPLOY_DIR" rev-parse --short HEAD)"
