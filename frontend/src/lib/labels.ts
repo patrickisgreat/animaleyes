@@ -16,6 +16,7 @@ export const STATES: Record<string, [string, string, string]> = {
 
 export const EVENTS: Record<string, [string, string]> = {
   open: ["🍽️", "Fed"], close: ["✅", "Closed"], veto: ["🚫", "Blocked — wrong animal"],
+  sighting: ["👀", "Spotted at the bowl"],
   feed_failed: ["⚠️", "Feed failed"], close_failed: ["⚠️", "Close failed"],
   rotated_empty_plate: ["🔄", "Empty plate — rotated to the next"], empty_no_food: ["🪹", "Served plate was empty"],
   wanted_food_none_left: ["🙁", "Wanted food, none left"], startup: ["▶️", "Started up"],

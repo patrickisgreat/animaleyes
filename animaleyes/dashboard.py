@@ -49,6 +49,7 @@ MAIN_EVENT_KINDS = (
     "open",
     "close",
     "veto",
+    "sighting",
     "feed_failed",
     "close_failed",
     "rotated_empty_plate",

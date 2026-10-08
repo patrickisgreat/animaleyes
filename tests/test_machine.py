@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from animaleyes.detect import Verdict
 from tests.conftest import (
     BOWIE,
     CAT,
@@ -12,6 +13,7 @@ from tests.conftest import (
     GRRR,
     HAS_FOOD,
     NO_FOOD,
+    UNSURE,
     Harness,
 )
 
@@ -151,11 +153,64 @@ def test_veto_in_watching_for_bowie_and_cat(h: Harness) -> None:
     h.llm.identify_result = BOWIE
     h.run(seconds=8)
     assert h.state() == "WATCHING"
-    assert len(h.events("veto")) == 1
-    assert h.events("veto")[0].data["animal"] == "bowie"
+    assert [e.data["animal"] for e in h.events("veto")] == ["bowie"]
+    # The cat right after Bowie still gets its own event; the repeat limit is per animal.
     h.llm.identify_result = CAT
     h.run(seconds=8)
-    assert len(h.events("veto")) == 1  # rate-limited within VETO_REPEAT_S
+    assert sorted(e.data["animal"] for e in h.events("veto")) == ["bowie", "cat"]
+    h.run(seconds=60)
+    assert len(h.events("veto")) == 2  # same cat lingering: rate-limited within VETO_REPEAT_S
+    assert any("veto: cat" in s for s in h.notifier.sent)
+    assert h.feeder.opens == []
+
+
+def test_one_confident_cat_read_is_enough_to_log(h: Harness) -> None:
+    # A cat that glances into the camera once, then an unsure frame, is still recorded.
+    h.load_plates(1)
+    h.tick()
+    h.llm.identify_result = CAT
+    h.tick()
+    h.llm.identify_result = UNSURE
+    h.run(seconds=10)
+    assert len(h.events("veto")) == 1
+    assert h.events("veto")[0].frames
+
+
+def test_a_shaky_cat_read_needs_a_second_one(h: Harness) -> None:
+    h.load_plates(1)
+    h.tick()
+    h.llm.identify_result = Verdict(animal="cat", confidence=0.4, at_bowl=True, reason="maybe")
+    h.tick()
+    assert h.events("veto") == []
+    h.run(seconds=4)
+    assert len(h.events("veto")) == 1
+
+
+def test_cat_beside_grrr_is_logged_and_blocks_the_open(h: Harness) -> None:
+    h.load_plates(1)
+    h.llm.identify_result = Verdict(
+        animal="grrr", confidence=0.95, at_bowl=True, other_animals_present=["cat"], reason="both"
+    )
+    h.run(seconds=12)
+    assert [e.data["animal"] for e in h.events("veto")] == ["cat"]
+    assert h.feeder.opens == []
+
+
+def test_lingering_cat_writes_frames_only_for_logged_events(h: Harness) -> None:
+    h.load_plates(1)
+    h.llm.identify_result = CAT
+    h.run(seconds=60)
+    assert len(h.events("veto")) == 1
+    assert len(list(h.machine.frames_dir.glob("*veto_cat*"))) == len(h.events("veto")[0].frames)
+
+
+def test_done_still_logs_the_cat(h: Harness) -> None:
+    h.tick(motion=False)
+    assert h.state() == "DONE"
+    h.llm.identify_result = CAT
+    h.run(seconds=10)
+    assert [e.data["animal"] for e in h.events("sighting")] == ["cat"]
+    assert h.events("wanted_food_none_left") == []
     assert h.feeder.opens == []
 
 

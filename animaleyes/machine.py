@@ -34,6 +34,10 @@ CAMERA_OFFLINE_S = 60
 VETO_REPEAT_S = 300
 NONE_LEFT_REPEAT_S = 3600
 VERDICT_HISTORY = 6
+# One read this sure of a non-target animal is logged as a sighting on its own; below it we
+# wait for the same animal twice in a row. Logging only — it never gates or triggers a feed.
+SIGHTING_MIN_CONF = 0.6
+NOT_AN_ANIMAL = ("grrr", "none", "unsure")
 
 
 class State(StrEnum):
@@ -464,6 +468,7 @@ class Machine:
                 frames=self._save_frames("none_left"),
                 notify=True,
             )
+        self._log_sightings(now, "sighting", [verdict])
 
     # helpers -----------------------------------------------------------
     def _motion(self, now: datetime) -> bool:
@@ -503,22 +508,37 @@ class Machine:
         return None
 
     def _check_veto(self, now: datetime) -> None:
-        recent = list(self.verdicts)[-2:]
-        if len(recent) < 2:
+        self._log_sightings(now, "veto", list(self.verdicts)[-2:])
+
+    def _log_sightings(self, now: datetime, kind: str, recent: list[Verdict]) -> None:
+        """Record every non-target animal in the latest verdict, once per animal per
+        VETO_REPEAT_S. A sighting needs one confident read, or the same animal twice in a row,
+        so a single shaky frame can't cry cat. Animals named in other_animals_present count too
+        (Chicken next to Grrr is still Chicken at the bowl).
+
+        Deduped per animal, not per kind: Bowie wandering past must not silence the cat."""
+        if not recent:
             return
-        animals = {v.animal for v in recent}
-        # A stable, non-target real animal seen twice in a row -> veto (never a feedable read,
-        # never a "none"/"unsure"). Works for any persona without hardcoding the roster.
-        if len(animals) == 1 and animals.isdisjoint({"grrr", "none", "unsure"}):
-            animal = recent[-1].animal
+        latest = recent[-1]
+        steady = len(recent) >= 2 and recent[-2].animal == latest.animal
+        seen = []
+        if latest.animal not in NOT_AN_ANIMAL and (
+            steady or latest.confidence >= SIGHTING_MIN_CONF
+        ):
+            seen.append(latest.animal)
+        seen += [
+            a for a in latest.other_animals_present if a not in NOT_AN_ANIMAL and a not in seen
+        ]
+        for animal in seen:
             self._log_once(
                 now,
-                "veto",
-                f"{animal}: {recent[-1].reason}",
+                kind,
+                f"{animal}: {latest.reason}",
                 VETO_REPEAT_S,
-                data={"animal": animal, "verdict": recent[-1].to_dict()},
-                frames=self._save_frames(f"veto_{animal}"),
+                data={"animal": animal, "verdict": latest.to_dict()},
+                frames=lambda tag=f"{kind}_{animal}": self._save_frames(tag),
                 notify=True,
+                dedupe=f"{kind}:{animal}",
             )
 
     def _plate_under_lid(self, feeder: Feeder) -> int:
@@ -542,12 +562,22 @@ class Machine:
         repeat_s: int,
         *,
         data: dict[str, Any] | None = None,
-        frames: list[str] | None = None,
+        frames: list[str] | Callable[[], list[str]] | None = None,
         notify: bool = False,
+        dedupe: str | None = None,
     ) -> None:
-        last = self.store.last_event_at(kind)
+        # `dedupe` narrows the repeat window below the event kind (e.g. per animal); persisted
+        # so a restart doesn't re-announce what was just announced.
+        if dedupe:
+            last = self._when(f"logged_at:{dedupe}")
+        else:
+            last = self.store.last_event_at(kind)
         if last and now - last < timedelta(seconds=repeat_s):
             return
+        if dedupe:
+            self.store.set(f"logged_at:{dedupe}", now.isoformat())
+        if callable(frames):  # only write images for an event that is actually logged
+            frames = frames()
         event_id = self.store.add_event(now, kind, reason, data, frames)
         if notify:
             self._notify(f"{kind}: {reason}", event_id)
