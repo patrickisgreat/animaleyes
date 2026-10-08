@@ -38,6 +38,8 @@ VERDICT_HISTORY = 6
 # wait for the same animal twice in a row. Logging only — it never gates or triggers a feed.
 SIGHTING_MIN_CONF = 0.6
 NOT_AN_ANIMAL = ("grrr", "none", "unsure")
+# States where the machine already runs its own identification or the lid is open.
+WATCH_SKIP_STATES = ("WATCHING", "OPENING", "VERIFYING", "FEEDING", "CLOSING")
 
 
 class State(StrEnum):
@@ -92,6 +94,9 @@ class Machine:
         self.capture_dir = capture_dir
         self.verdicts: deque[Verdict] = deque(maxlen=VERDICT_HISTORY)
         self.last_verdict: Verdict | FeedingVerdict | None = None
+        self.last_verdict_at: datetime | None = None
+        self.watch_verdicts: deque[Verdict] = deque(maxlen=2)
+        self.last_watch_at: datetime | None = None
         self.judged_frames: list[Frame] = []
         self.last_llm_at: datetime | None = None
         self.last_feeding_verdict: FeedingVerdict | None = None
@@ -152,6 +157,7 @@ class Machine:
         self._consume_dashboard_requests(now)
         if self.settings.CAPTURE_MODE:
             self._tick_capture(now)
+        self._tick_watch(now)
 
         state = self.state
         lid_open = state in (State.VERIFYING, State.FEEDING, State.CLOSING)
@@ -198,6 +204,7 @@ class Machine:
         verdict = self.llm.identify(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
+        self.last_verdict_at = now
         self.verdicts.append(verdict)
         self._check_veto(now)
         if self._grrr_confirmed():
@@ -278,6 +285,7 @@ class Machine:
         verdict = self.llm.verify_food(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
+        self.last_verdict_at = now
         self.last_feeding_verdict = verdict
         plate = self.store.get_int("feeding_plate", 0)
 
@@ -382,6 +390,7 @@ class Machine:
         verdict = self.llm.feeding_check(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
+        self.last_verdict_at = now
         self.last_feeding_verdict = verdict
         if verdict.grrr_at_bowl:
             self.store.set("grrr_last_seen_at", now.isoformat())
@@ -459,6 +468,7 @@ class Machine:
         verdict = self.llm.identify(self.judged_frames)
         self.last_llm_at = now
         self.last_verdict = verdict
+        self.last_verdict_at = now
         if verdict.animal == "grrr":
             self._log_once(
                 now,
@@ -510,7 +520,15 @@ class Machine:
     def _check_veto(self, now: datetime) -> None:
         self._log_sightings(now, "veto", list(self.verdicts)[-2:])
 
-    def _log_sightings(self, now: datetime, kind: str, recent: list[Verdict]) -> None:
+    def _log_sightings(
+        self,
+        now: datetime,
+        kind: str,
+        recent: list[Verdict],
+        *,
+        frames: list[Frame] | None = None,
+        include_target: bool = False,
+    ) -> None:
         """Record every non-target animal in the latest verdict, once per animal per
         VETO_REPEAT_S. A sighting needs one confident read, or the same animal twice in a row,
         so a single shaky frame can't cry cat. Animals named in other_animals_present count too
@@ -520,15 +538,12 @@ class Machine:
         if not recent:
             return
         latest = recent[-1]
+        skip = ("none", "unsure") if include_target else NOT_AN_ANIMAL
         steady = len(recent) >= 2 and recent[-2].animal == latest.animal
         seen = []
-        if latest.animal not in NOT_AN_ANIMAL and (
-            steady or latest.confidence >= SIGHTING_MIN_CONF
-        ):
+        if latest.animal not in skip and (steady or latest.confidence >= SIGHTING_MIN_CONF):
             seen.append(latest.animal)
-        seen += [
-            a for a in latest.other_animals_present if a not in NOT_AN_ANIMAL and a not in seen
-        ]
+        seen += [a for a in latest.other_animals_present if a not in skip and a not in seen]
         for animal in seen:
             self._log_once(
                 now,
@@ -536,7 +551,7 @@ class Machine:
                 f"{animal}: {latest.reason}",
                 VETO_REPEAT_S,
                 data={"animal": animal, "verdict": latest.to_dict()},
-                frames=lambda tag=f"{kind}_{animal}": self._save_frames(tag),
+                frames=lambda tag=f"{kind}_{animal}": self._save_frames(tag, frames),
                 notify=True,
                 dedupe=f"{kind}:{animal}",
             )
@@ -581,6 +596,38 @@ class Machine:
         event_id = self.store.add_event(now, kind, reason, data, frames)
         if notify:
             self._notify(f"{kind}: {reason}", event_id)
+
+    def _tick_watch(self, now: datetime) -> None:
+        """Always-on local look at the bowl, so the log and the dashboard know who's there even
+        when the feeding machine isn't looking: off hours, disabled, idle, cooldown, done.
+
+        Uses only the free local detector, every WATCH_INTERVAL_S, motion or not (a cat that
+        sits and stares makes no motion). Visibility only: it updates the shown verdict and
+        logs per-animal sightings. It never moves the machine or the feeder, and Grrr seen
+        here still has to be confirmed in WATCHING before anything opens.
+        """
+        if not self.settings.ALWAYS_WATCH or self.capture_gate is None:
+            return
+        if self.state in WATCH_SKIP_STATES:
+            return  # the machine is already identifying (or the lid is open)
+        last = self.last_watch_at
+        if last and (now - last).total_seconds() < max(1, self.settings.WATCH_INTERVAL_S):
+            return
+        frames = self.frames.latest(1)
+        if not frames:
+            return
+        self.last_watch_at = now  # in memory: a restart re-checking sooner is harmless
+        try:
+            verdict = self.capture_gate.identify(frames)
+        except Exception as exc:  # noqa: BLE001 - a broken detector must not stall the loop
+            self._log_once(now, "watch_error", f"detector failed: {exc}", 3600)
+            return
+        self.last_verdict = verdict
+        self.last_verdict_at = now
+        self.watch_verdicts.append(verdict)
+        self._log_sightings(
+            now, "sighting", list(self.watch_verdicts), frames=frames, include_target=True
+        )
 
     def _tick_capture(self, now: datetime) -> None:
         """Capture mode: on any motion the local detector reads as an animal, save one frame,

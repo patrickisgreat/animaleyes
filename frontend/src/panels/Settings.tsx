@@ -28,6 +28,8 @@ const CONTROLS: Ctl[] = [
   { key: "COLLECT_TRAINING", label: "Auto-collect training frames", type: "bool", group: "Training" },
   { key: "CAPTURE_MODE", label: "Capture mode (save animal frames to tag)", type: "bool", group: "Training" },
   { key: "CAPTURE_MIN_GAP_S", label: "Min seconds between captures", type: "number", group: "Training" },
+  { key: "ALWAYS_WATCH", label: "Always watch & log animals (local model, incl. off hours)", type: "bool", group: "Training" },
+  { key: "WATCH_INTERVAL_S", label: "Seconds between always-on checks", type: "number", group: "Training" },
   { key: "LID_POLL_S", label: "Lid check interval (sec)", type: "number", group: "Advanced" },
   { key: "FEED_RETRY_BACKOFF_S", label: "Backoff after a failed feed (sec)", type: "number", group: "Advanced" },
   { key: "HEARTBEAT_MIN", label: "Heartbeat interval (min)", type: "number", group: "Advanced" },

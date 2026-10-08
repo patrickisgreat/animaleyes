@@ -14,6 +14,7 @@ from tests.conftest import (
     HAS_FOOD,
     NO_FOOD,
     UNSURE,
+    FakeLLM,
     Harness,
 )
 
@@ -579,3 +580,58 @@ def test_heartbeat_pings_the_dead_mans_switch(h: Harness) -> None:
     h.load_plates(1)
     h.tick()  # first tick fires the heartbeat
     assert pings, "heartbeat should ping the external healthcheck"
+
+
+def watching_harness(tmp_path, start: datetime = datetime(2026, 9, 24, 12, 0)) -> Harness:
+    """A harness with the free local detector wired in, at noon (off hours) by default."""
+    h = Harness(tmp_path, start=start)
+    h.capture_gate = FakeLLM()
+    h.machine = h.new_machine()
+    return h
+
+
+def test_watch_logs_the_cat_off_hours_without_motion_or_paid_calls(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.load_plates(1)
+    h.capture_gate.identify_result = CAT
+    h.run(seconds=10, motion=False)  # a cat sitting still, staring
+    assert h.state() == "OUTSIDE_WINDOW"
+    assert [e.data["animal"] for e in h.events("sighting")] == ["cat"]
+    assert h.events("sighting")[0].frames
+    assert h.machine.last_verdict.animal == "cat"  # the dashboard sees her too
+    assert h.llm.identify_calls == 0  # nothing paid off hours
+    assert h.feeder.calls == []
+
+
+def test_watch_logs_grrr_off_hours_but_never_opens(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.load_plates(1)
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=60)
+    assert [e.data["animal"] for e in h.events("sighting")] == ["grrr"]
+    assert h.state() == "OUTSIDE_WINDOW"
+    assert h.feeder.calls == []
+
+
+def test_watch_runs_in_cooldown_and_idle_but_not_while_watching(tmp_path) -> None:
+    h = watching_harness(tmp_path, start=datetime(2026, 9, 24, 22, 0))
+    h.load_plates(1)
+    h.tick(motion=False)
+    assert h.state() == "IDLE"
+    h.capture_gate.identify_result = CAT
+    h.tick(motion=False, seconds=2)
+    assert [e.data["animal"] for e in h.events("sighting")] == ["cat"]
+    calls = h.capture_gate.identify_calls
+    h.run(seconds=10)  # motion -> WATCHING: the machine's own check takes over
+    assert h.state() == "WATCHING"
+    assert h.capture_gate.identify_calls == calls
+
+
+def test_watch_respects_interval_and_switch(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.config.update({"WATCH_INTERVAL_S": 5})
+    h.run(seconds=10, motion=False)
+    assert h.capture_gate.identify_calls == 2
+    h.config.update({"ALWAYS_WATCH": False})
+    h.run(seconds=10, motion=False)
+    assert h.capture_gate.identify_calls == 2

@@ -239,6 +239,9 @@ def create_app(
             "identifier": settings.IDENTIFIER,
             "ptz_available": ptz is not None,
             "last_verdict": verdict,
+            "last_verdict_age_s": int((now - machine.last_verdict_at).total_seconds())
+            if machine.last_verdict_at
+            else None,
             "last_llm_at": machine.last_llm_at.isoformat(timespec="seconds")
             if machine.last_llm_at
             else None,

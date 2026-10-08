@@ -66,6 +66,11 @@ class Settings:
     # feeder (it only writes image files).
     CAPTURE_MODE: bool = False
     CAPTURE_MIN_GAP_S: int = 3  # at most one captured frame this often
+    # Always-on watch: the free local detector checks the bowl every WATCH_INTERVAL_S in every
+    # state where the feeding machine isn't already looking (off hours included) and logs who
+    # it sees. Logging and the dashboard only; it never opens the feeder.
+    ALWAYS_WATCH: bool = True
+    WATCH_INTERVAL_S: int = 2
     # Feeding verification: after opening a plate, check with the camera that the served bowl
     # actually has food. If it's confirmed empty, close it and rotate to the next loaded plate,
     # so a wrong/empty plate doesn't mean a midnight rescue. Off by default (it moves the tray

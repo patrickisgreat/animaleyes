@@ -36,15 +36,17 @@ export const fmtIn = (s: number) => (!s ? "now" : s < 90 ? `in ${s}s` : `in ${Ma
 export function verdictText(s: Status): { who: string; why: string } {
   const v = s.last_verdict;
   if (!v) return { who: "Nothing yet", why: "No animal checked since the last feed" };
-  if (v.animal === "none") return { who: "No animal at the bowl", why: v.reason || "" };
-  if (v.animal === "unsure") return { who: "Not sure who that is", why: v.reason || "" };
+  // Say how old the read is, so a stale "no animal" never looks live.
+  const age = s.last_verdict_age_s != null && s.last_verdict_age_s >= 10 ? ` · ${fmtAge(s.last_verdict_age_s)}` : "";
+  if (v.animal === "none") return { who: "No animal at the bowl" + age, why: v.reason || "" };
+  if (v.animal === "unsure") return { who: "Not sure who that is" + age, why: v.reason || "" };
   const names = nameMap(s.personas);
   const pct = Math.round((v.confidence || 0) * 100);
   const extra = v.other_animals_present?.length
     ? " · also " + v.other_animals_present.map((a) => names[a] || a).join(", ")
     : "";
   return {
-    who: `${names[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}`,
+    who: `${names[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}${age}`,
     why: v.reason || "",
   };
 }
