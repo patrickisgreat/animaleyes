@@ -266,12 +266,17 @@ def test_open_now_raises_on_timeout_when_no_feed_active(monkeypatch) -> None:
         pass
 
 
-def test_claude_rebuilds_reference_blocks_when_descriptions_change(tmp_path, monkeypatch) -> None:
-    """Editing an animal description from the dashboard takes effect: the cached prefix is
-    rebuilt with the new label on the next identify."""
+def test_claude_rebuilds_reference_blocks_when_personas_change(tmp_path, monkeypatch) -> None:
+    """Editing a persona from the dashboard takes effect: the cached prefix and schema are
+    rebuilt with the new label/roster on the next identify."""
+    from animaleyes.personas import Persona
     from animaleyes.vision import ClaudeIdentifier
 
-    desc = {"grrr": "v1", "bowie": "b", "cat": "c"}
+    roster = [
+        Persona("grrr", "Grrr", "v1", feedable=True),
+        Persona("bowie", "Bowie", "b"),
+        Persona("cat", "Chicken", "c"),
+    ]
     for a in ("grrr", "bowie", "cat"):
         (tmp_path / a).mkdir()
 
@@ -279,11 +284,161 @@ def test_claude_rebuilds_reference_blocks_when_descriptions_change(tmp_path, mon
         pass
 
     ident = ClaudeIdentifier(
-        tmp_path, store=None, model=lambda: "m", client=_NoClient(), descriptions=lambda: desc
+        tmp_path, store=None, model=lambda: "m", client=_NoClient(), personas=lambda: roster
     )
     assert any("v1" in b.get("text", "") for b in ident.reference_blocks)
-    desc["grrr"] = "a new description"
-    # identify() would call the API, so just exercise the rebuild guard directly.
-    if ident.descriptions() != ident._desc_used:
-        ident.reload_references()
+    assert ident.target_name == "Grrr"
+    assert "cat" in ident.identify_schema["properties"]["animal"]["enum"]
+    # Rename the target and add a new animal; the next guard rebuilds everything.
+    roster[0] = Persona("grrr", "Gizmo", "a new description", feedable=True)
+    roster.append(Persona("rex", "Rex", "a big dog"))
+    ident._maybe_reload()
     assert any("a new description" in b.get("text", "") for b in ident.reference_blocks)
+    assert ident.target_name == "Gizmo"
+    assert "rex" in ident.identify_schema["properties"]["animal"]["enum"]
+
+
+def test_persona_store_crud_and_feed_invariant(tmp_path) -> None:
+    from animaleyes.personas import PersonaStore
+
+    store = PersonaStore(tmp_path / "personas.json")
+    roster = store.load()  # seeds defaults
+    names = {p.key: p.name for p in roster}
+    assert names["cat"] == "Chicken"  # the cat's display name
+    assert [p.key for p in roster if p.feedable] == ["grrr"]  # exactly the target is feedable
+
+    # Add a new animal — always blocked, with a slug key.
+    rex = store.upsert("Rex", "a big dog")
+    assert rex.key == "rex" and rex.feedable is False
+    assert "rex" in store.keys()
+
+    # Rename the cat; key stays stable so photos/history don't move.
+    store.upsert("Mr Whiskers", "sleek", key="cat")
+    assert store.names()["cat"] == "Mr Whiskers"
+
+    # Even if a tampered file marks another animal feedable, load() re-locks to the target only.
+    (tmp_path / "personas.json").write_text(
+        '[{"key":"grrr","name":"Grrr","feedable":false},'
+        '{"key":"bowie","name":"Bowie","feedable":true}]'
+    )
+    reloaded = {p.key: p.feedable for p in store.load()}
+    assert reloaded == {"grrr": True, "bowie": False}
+
+    # The feedable target can never be deleted.
+    import pytest
+
+    with pytest.raises(ValueError):
+        store.delete("grrr")
+
+
+def test_theme_store_crud_and_validation(tmp_path) -> None:
+    from animaleyes.themes import ThemeStore
+
+    store = ThemeStore(tmp_path / "themes.json")
+    assert store.load() == []  # no custom themes to start
+
+    # Create: unknown tokens and bad hex values are dropped; a short id is assigned.
+    t = store.upsert("Midnight", {"bg": "#0d0a1a", "teal": "nothex", "bogus": "#ffffff"})
+    assert t.id and t.name == "Midnight"
+    assert t.colors == {"bg": "#0d0a1a"}  # teal (bad hex) and bogus (unknown) dropped
+
+    # Edit by id.
+    store.upsert("Midnight 2", {"bg": "#010203", "teal": "#112233"}, theme_id=t.id)
+    reloaded = store.load()
+    assert len(reloaded) == 1
+    assert reloaded[0].name == "Midnight 2"
+    assert reloaded[0].colors == {"bg": "#010203", "teal": "#112233"}
+
+    # Delete.
+    store.delete(t.id)
+    assert store.load() == []
+
+
+def test_camera_pump_reconnects_on_a_stalled_stream(tmp_path) -> None:
+    """A camera whose socket stays open but stops sending frames must not hang forever: the
+    pump raises after stall_s so run()'s reconnect kicks in."""
+    import os
+    import time as _t
+
+    from animaleyes.camera import Camera, FrameBuffer
+    from animaleyes.config import Secrets
+
+    r, w = os.pipe()
+    rf = os.fdopen(r, "rb", buffering=0)
+    cam = Camera(Secrets.from_env(), FrameBuffer(), stall_s=0.3)
+    start = _t.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="no camera frames"):
+            cam._pump(rf)
+    finally:
+        rf.close()
+        os.close(w)
+    assert _t.monotonic() - start < 3  # bailed promptly, didn't hang
+
+
+def test_camera_pump_pushes_frames_then_reports_eof() -> None:
+    """Normal path: JPEGs on the pipe become frames; a closed stream returns (EOF -> reconnect)."""
+    import os
+
+    from animaleyes.camera import Camera, FrameBuffer
+    from animaleyes.config import Secrets
+
+    tiny = bytes.fromhex("ffd8") + b"x" + bytes.fromhex("ffd9")
+    r, w = os.pipe()
+    rf = os.fdopen(r, "rb", buffering=0)
+    os.write(w, tiny + tiny)
+    os.close(w)  # EOF after the two frames
+    buf = FrameBuffer()
+    cam = Camera(Secrets.from_env(), buf, stall_s=5)
+    try:
+        cam._pump(rf)  # returns on EOF (no raise inside _pump)
+    finally:
+        rf.close()
+    assert len(buf.latest(5)) == 2
+
+
+def test_email_notifier_enabled_flag_and_routine_is_silent() -> None:
+    from animaleyes.notify import EmailNotifier
+
+    off = EmailNotifier("", 587, "", "", "", [])
+    assert off.enabled is False
+    off.alert("x")  # disabled: no SMTP, no raise
+    off.send("x")
+
+    on = EmailNotifier("smtp.example.com", 587, "u", "p", "u@x.com", ["a@b.com"])
+    assert on.enabled is True
+    on.send("routine")  # routine never emails (no SMTP attempted), must not raise
+
+
+def test_multinotifier_fans_out_and_survives_a_bad_channel() -> None:
+    from animaleyes.notify import LogNotifier, MultiNotifier
+
+    class Boom:
+        def send(self, t):
+            raise RuntimeError("down")
+
+        def alert(self, t):
+            raise RuntimeError("down")
+
+    sink = LogNotifier()
+    m = MultiNotifier([Boom(), sink])
+    m.send("hi")
+    m.alert("oops")
+    assert "hi" in sink.sent
+    assert "oops" in sink.alerts
+
+
+def test_pushover_payload_is_emergency_priority() -> None:
+    from animaleyes.notify import PushoverNotifier
+
+    off = PushoverNotifier("", "")
+    assert off.enabled is False
+    off.alert("x")  # disabled: no HTTP, no raise
+
+    n = PushoverNotifier("tok", "usr", retry_s=10, expire_s=99999)
+    assert n.enabled is True
+    p = n._payload("camera offline")
+    assert p["priority"] == 2  # emergency: repeats until acknowledged
+    assert p["retry"] >= 30 and p["expire"] <= 10800  # clamped to Pushover's limits
+    assert p["message"] == "camera offline"
+    n.send("routine")  # routine never pushes, must not raise

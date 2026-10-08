@@ -2,36 +2,52 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
+/* ---- Themes: RGB channel triplets so Tailwind /opacity works and swaps at runtime ---- */
+:root,
+[data-theme="sage"] {
+  --c-bg: 18 21 14; --c-surface: 27 32 22; --c-surface2: 36 43 29; --c-edge: 59 69 49;
+  --c-ink: 235 236 215; --c-muted: 159 172 146; --c-bad: 221 143 118;
+  --c-teal: 147 192 164; --c-sage: 182 196 162; --c-pearl: 212 205 171;
+  --c-beige: 220 226 189; --c-ash: 142 155 144;
+  --c-accent-ink: 18 32 24;
+  --c-title1: 220 226 189; --c-title2: 147 192 164;   /* beige -> teal */
+}
+[data-theme="aurora"] {
+  --c-bg: 13 10 26; --c-surface: 23 18 51; --c-surface2: 31 25 66; --c-edge: 52 42 94;
+  --c-ink: 237 238 255; --c-muted: 154 160 208; --c-bad: 255 107 157;
+  --c-teal: 100 223 223;   /* pearl-aqua  (primary) */
+  --c-sage: 86 207 225;    /* sky-blue-light */
+  --c-pearl: 94 96 206;    /* slate-blue */
+  --c-beige: 128 255 219;  /* aquamarine */
+  --c-ash: 105 48 195;     /* indigo-bloom */
+  --c-accent-ink: 5 30 30;
+  --c-title1: 116 0 184; --c-title2: 128 255 219;      /* royal-violet -> aquamarine */
+}
 
+html { font-family: "Lato", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 body {
   margin: 0;
-  color: theme("colors.ink");
+  color: rgb(var(--c-ink));
   background:
-    radial-gradient(1100px 520px at 12% -8%, rgba(147, 192, 164, 0.1), transparent 60%),
-    radial-gradient(900px 500px at 100% 0%, rgba(212, 205, 171, 0.07), transparent 55%),
-    theme("colors.bg");
+    radial-gradient(1100px 520px at 12% -8%, rgb(var(--c-teal) / 0.12), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgb(var(--c-pearl) / 0.1), transparent 55%),
+    rgb(var(--c-bg));
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
 }
 
-/* thin, themed scrollbars */
 *::-webkit-scrollbar { width: 9px; height: 9px; }
-*::-webkit-scrollbar-thumb { background: theme("colors.edge"); border-radius: 8px; }
+*::-webkit-scrollbar-thumb { background: rgb(var(--c-edge)); border-radius: 8px; }
 
 @layer components {
-  .card {
-    @apply bg-surface border border-edge rounded-xl2 p-4;
-  }
-  .h2 {
-    @apply text-[12px] font-extrabold uppercase tracking-[0.09em] text-teal mb-3;
-  }
+  .card { @apply bg-surface border border-edge rounded-xl2 p-4; }
+  .h2 { @apply text-[12px] font-extrabold uppercase tracking-[0.09em] text-teal mb-3; }
   .btn {
     @apply font-bold border border-edge bg-surface2 text-ink rounded-[10px] px-[14px] min-h-[42px]
            cursor-pointer transition hover:border-ash/70 active:translate-y-px
            disabled:opacity-50 disabled:cursor-default inline-flex items-center justify-center gap-2;
   }
-  .btn-primary { @apply bg-teal text-[#122018] border-transparent hover:brightness-105; }
+  .btn-primary { @apply bg-teal border-transparent hover:brightness-105; color: rgb(var(--c-accent-ink)); }
   .btn-danger  { @apply bg-bad/15 text-bad border-bad/40; }
   .btn-sm      { @apply min-h-[36px] px-[11px] text-[13px]; }
   .pill {
@@ -41,7 +57,12 @@ body {
   .input {
     @apply bg-bg text-ink border border-edge rounded-lg px-2.5 py-2 text-[16px] min-w-[120px] max-w-[170px];
   }
-  .tile {
-    @apply bg-surface2 border border-edge border-l-[3px] rounded-[10px] px-3 py-2.5;
+  .tile { @apply bg-surface2 border border-edge border-l-[3px] rounded-[10px] px-3 py-2.5; }
+  .brand {
+    background: linear-gradient(90deg, rgb(var(--c-title1)), rgb(var(--c-title2)));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
   }
 }
+
+/* Live view fills the screen when the browser puts it in fullscreen (object-contain centers it). */
+.live-box:fullscreen { aspect-ratio: auto; border-radius: 0; width: 100vw; height: 100vh; }

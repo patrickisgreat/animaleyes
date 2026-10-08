@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { Button, Card, useToast } from "../lib/ui";
 
-type Ctl = { key: string; label: string; type: "bool" | "number" | "text" | "select"; group: string; opts?: string[] };
+type Ctl = { key: string; label: string; type: "bool" | "number" | "text" | "time" | "select"; group: string; opts?: string[] };
 const CONTROLS: Ctl[] = [
   { key: "ENABLED", label: "Enabled", type: "bool", group: "Schedule" },
-  { key: "ACTIVE_START", label: "Active from", type: "text", group: "Schedule" },
-  { key: "ACTIVE_END", label: "Active until", type: "text", group: "Schedule" },
+  { key: "ACTIVE_START", label: "Active from", type: "time", group: "Schedule" },
+  { key: "ACTIVE_END", label: "Active until", type: "time", group: "Schedule" },
   { key: "DRY_RUN", label: "Dry run (don't move feeder)", type: "bool", group: "Schedule" },
   { key: "IDENTIFIER", label: "Detector", type: "select", group: "Identification", opts: ["cascade", "yolo", "claude"] },
   { key: "GRRR_MIN_CONF", label: "Min confidence for Grrr", type: "number", group: "Identification" },
@@ -16,10 +16,18 @@ const CONTROLS: Ctl[] = [
   { key: "LEAVE_TIMEOUT_S", label: "Close after gone (sec)", type: "number", group: "Feeding" },
   { key: "FEEDING_MAX_MIN", label: "Max feeding length (min)", type: "number", group: "Feeding" },
   { key: "FEEDING_POLL_S", label: "Check interval while feeding (sec)", type: "number", group: "Feeding" },
+  { key: "VERIFY_FOOD", label: "Verify a plate has food after opening", type: "bool", group: "Plate verification" },
+  { key: "VERIFY_EMPTY_CONFIRMATIONS", label: "Empty reads before rotating", type: "number", group: "Plate verification" },
+  { key: "MAX_ROTATE_FOR_FOOD", label: "Max rotations hunting for food", type: "number", group: "Plate verification" },
+  { key: "VERIFY_POLL_S", label: "Food check interval (sec)", type: "number", group: "Plate verification" },
+  { key: "VERIFY_TIMEOUT_S", label: "Give up verifying after (sec)", type: "number", group: "Plate verification" },
+  { key: "CAMERA_FPS", label: "Live video FPS (restart to apply)", type: "number", group: "Motion & sensing" },
   { key: "MOTION_SOURCE", label: "Motion source", type: "select", group: "Motion & sensing", opts: ["camera", "frames"] },
   { key: "MOTION_HOLD_S", label: "Keep watching after motion (sec)", type: "number", group: "Motion & sensing" },
   { key: "LLM_MIN_INTERVAL_S", label: "Min seconds between checks", type: "number", group: "Motion & sensing" },
   { key: "COLLECT_TRAINING", label: "Auto-collect training frames", type: "bool", group: "Training" },
+  { key: "CAPTURE_MODE", label: "Capture mode (save animal frames to tag)", type: "bool", group: "Training" },
+  { key: "CAPTURE_MIN_GAP_S", label: "Min seconds between captures", type: "number", group: "Training" },
   { key: "LID_POLL_S", label: "Lid check interval (sec)", type: "number", group: "Advanced" },
   { key: "FEED_RETRY_BACKOFF_S", label: "Backoff after a failed feed (sec)", type: "number", group: "Advanced" },
   { key: "HEARTBEAT_MIN", label: "Heartbeat interval (min)", type: "number", group: "Advanced" },
@@ -64,6 +72,8 @@ export function Settings() {
                     <select className="input" value={String(cfg[c.key])} onChange={(e) => set(c.key, e.target.value)}>
                       {c.opts!.map((o) => <option key={o}>{o}</option>)}
                     </select>
+                  ) : c.type === "time" ? (
+                    <input className="input" type="time" value={String(cfg[c.key] ?? "")} onChange={(e) => set(c.key, e.target.value)} />
                   ) : (
                     <input className="input" type={c.type} step="any" value={String(cfg[c.key])} onChange={(e) => set(c.key, e.target.value)} />
                   )}

@@ -1,5 +1,5 @@
 import type { Status } from "./api";
-import { NAMES } from "./api";
+import { nameMap } from "./api";
 
 // state -> [label, sublabel, dot tone]
 export const STATES: Record<string, [string, string, string]> = {
@@ -7,6 +7,7 @@ export const STATES: Record<string, [string, string, string]> = {
   IDLE: ["Watching", "Waiting for something to move at the bowl", "teal"],
   WATCHING: ["Checking", "Figuring out who's at the bowl", "sage"],
   OPENING: ["Opening", "Opening the feeder", "pearl"],
+  VERIFYING: ["Checking plate", "Lid open — making sure the plate has food", "sage"],
   FEEDING: ["Feeding", "Lid is open — Grrr is eating", "teal"],
   CLOSING: ["Closing", "Closing the feeder", "pearl"],
   COOLDOWN: ["Cooldown", "Waiting before the next feed", "muted"],
@@ -16,6 +17,7 @@ export const STATES: Record<string, [string, string, string]> = {
 export const EVENTS: Record<string, [string, string]> = {
   open: ["🍽️", "Fed"], close: ["✅", "Closed"], veto: ["🚫", "Blocked — wrong animal"],
   feed_failed: ["⚠️", "Feed failed"], close_failed: ["⚠️", "Close failed"],
+  rotated_empty_plate: ["🔄", "Empty plate — rotated to the next"], empty_no_food: ["🪹", "Served plate was empty"],
   wanted_food_none_left: ["🙁", "Wanted food, none left"], startup: ["▶️", "Started up"],
   bowie_during_feed: ["🐕", "Bowie during feeding"], cat_during_feed: ["🐈", "Cat during feeding"],
   camera_offline: ["📵", "Camera offline"], camera_online: ["📶", "Camera back online"],
@@ -35,12 +37,13 @@ export function verdictText(s: Status): { who: string; why: string } {
   if (!v) return { who: "Nothing yet", why: "No animal checked since the last feed" };
   if (v.animal === "none") return { who: "No animal at the bowl", why: v.reason || "" };
   if (v.animal === "unsure") return { who: "Not sure who that is", why: v.reason || "" };
+  const names = nameMap(s.personas);
   const pct = Math.round((v.confidence || 0) * 100);
   const extra = v.other_animals_present?.length
-    ? " · also " + v.other_animals_present.map((a) => NAMES[a] || a).join(", ")
+    ? " · also " + v.other_animals_present.map((a) => names[a] || a).join(", ")
     : "";
   return {
-    who: `${NAMES[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}`,
+    who: `${names[v.animal] || v.animal} · ${pct}% · ${v.at_bowl ? "at the bowl" : "nearby"}${extra}`,
     why: v.reason || "",
   };
 }

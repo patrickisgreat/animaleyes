@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from tests.conftest import BOWIE, CAT, EATING, GONE_EMPTY, GONE_FULL, GRRR, Harness
+from tests.conftest import (
+    BOWIE,
+    CAT,
+    EATING,
+    FOOD_UNSURE,
+    GONE_EMPTY,
+    GONE_FULL,
+    GRRR,
+    HAS_FOOD,
+    NO_FOOD,
+    Harness,
+)
 
 
 def confirm_grrr(h: Harness) -> None:
@@ -364,3 +375,152 @@ def test_feed_failure_backs_off_before_retrying(h: Harness) -> None:
     opens_before = len(h.feeder.opens)
     confirm_grrr(h)
     assert len(h.feeder.opens) == opens_before  # blocked by FEED_RETRY_BACKOFF_S
+
+
+def test_capture_mode_saves_animal_frames_unlabelled(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = GRRR  # the local gate sees an animal
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True})
+    h.load_plates(1)
+    h.tick(motion=True)
+    saved = list((h.tmp_path / "unlabeled").glob("*.jpg"))
+    assert len(saved) == 1
+    assert h.store.get_int("capture_count") == 1
+    # Capture only records frames; it must never move the feeder.
+    assert h.feeder.opens == []
+
+
+def test_capture_mode_skips_when_no_animal(h: Harness) -> None:
+    from tests.conftest import UNSURE, FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = UNSURE  # motion but nothing the detector recognises
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True})
+    h.load_plates(1)
+    h.tick(motion=True)
+    assert not (h.tmp_path / "unlabeled").exists() or not list(
+        (h.tmp_path / "unlabeled").glob("*.jpg")
+    )
+
+
+def test_capture_mode_off_saves_nothing(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = GRRR
+    h.machine.capture_gate = gate
+    h.load_plates(1)
+    h.tick(motion=True)
+    assert not (h.tmp_path / "unlabeled").exists()
+
+
+def test_capture_mode_throttles(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = CAT
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True, "CAPTURE_MIN_GAP_S": 10})
+    h.load_plates(1)
+    h.tick(motion=True)  # saved
+    h.tick(motion=True, seconds=2)  # 2s later, within the 10s gap -> skipped
+    assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 1
+    h.tick(motion=True, seconds=10)  # now past the gap -> saved again
+    assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 2
+
+
+def test_capture_mode_runs_outside_active_window(h: Harness) -> None:
+    from tests.conftest import FakeLLM
+
+    gate = FakeLLM()
+    gate.identify_result = BOWIE
+    h.machine.capture_gate = gate
+    h.config.update({"CAPTURE_MODE": True})
+    h.clock.now = datetime(2026, 9, 24, 13, 0)  # 1pm, well outside 21:00-06:00
+    h.load_plates(1)
+    h.tick(motion=True)
+    assert h.state() == "OUTSIDE_WINDOW"  # feeding logic is dormant...
+    assert len(list((h.tmp_path / "unlabeled").glob("*.jpg"))) == 1  # ...but capture still runs
+
+
+def _open_with_verify(h: Harness, *plates: int) -> None:
+    h.config.update({"VERIFY_FOOD": True})
+    h.load_plates(*(plates or (1,)))
+    confirm_grrr(h)  # motion + 3x Grrr -> OPENING -> VERIFYING (lid open, not yet feeding)
+
+
+def test_verify_food_present_proceeds_to_feeding(h: Harness) -> None:
+    h.llm.verify_result = HAS_FOOD
+    _open_with_verify(h, 1)
+    assert h.state() == "VERIFYING"
+    assert h.feeder.opens == ["open:1"]
+    h.run(seconds=15)  # first food check fires (>= VERIFY_POLL_S)
+    assert h.state() == "FEEDING"
+    assert "rotate" not in h.feeder.calls  # a full plate is never rotated away
+    assert h.llm.verify_calls >= 1
+
+
+def test_verify_empty_plate_rotates_to_a_full_one(h: Harness) -> None:
+
+    # First plate reads empty twice, then the next plate has food.
+    h.llm.verify_results = [NO_FOOD, NO_FOOD, HAS_FOOD]
+    _open_with_verify(h, 1, 2)
+    h.run(seconds=40)
+    assert h.events("rotated_empty_plate"), "should have rotated off the empty plate"
+    assert "open:2" in h.feeder.opens  # re-opened the next plate
+    assert "rotate" in h.feeder.calls
+    assert h.store.plates()[1] == "empty"  # the empty plate is recorded so it isn't re-offered
+    assert h.state() == "FEEDING"
+
+
+def test_verify_all_empty_alerts_and_closes(h: Harness) -> None:
+    h.llm.verify_result = NO_FOOD  # every plate reads empty
+    h.config.update({"MAX_ROTATE_FOR_FOOD": 2})
+    _open_with_verify(h, 1, 2)
+    h.run(seconds=80)
+    assert h.events("empty_no_food"), "should alert when no full plate is found"
+    assert h.state() in ("CLOSING", "COOLDOWN", "DONE")  # lid not left open on an empty plate
+
+
+def test_verify_unsure_never_rotates_and_times_out_to_feeding(h: Harness) -> None:
+
+    h.llm.verify_result = FOOD_UNSURE
+    h.config.update({"VERIFY_TIMEOUT_S": 30})
+    _open_with_verify(h, 1, 2)
+    h.run(seconds=45)
+    assert not h.events("rotated_empty_plate")  # unsure must never rotate the tray
+    assert "rotate" not in h.feeder.calls
+    assert h.state() == "FEEDING"  # don't starve Grrr: feed once verification gives up
+    assert h.store.plates()[1] == "loaded"
+
+
+def test_verify_off_opens_straight_to_feeding(h: Harness) -> None:
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert h.state() == "FEEDING"
+    assert h.llm.verify_calls == 0
+
+
+def test_feed_failure_sends_an_urgent_alert(h: Harness) -> None:
+    h.feeder.fail_open = True
+    h.load_plates(1)
+    confirm_grrr(h)
+    assert any("FEED FAILED" in a for a in h.notifier.alerts)
+
+
+def test_camera_offline_sends_an_urgent_alert(h: Harness) -> None:
+    h.clock.advance(seconds=61)  # no frames pushed -> camera considered offline
+    h.machine.tick()
+    assert any("CAMERA OFFLINE" in a for a in h.notifier.alerts)
+
+
+def test_heartbeat_pings_the_dead_mans_switch(h: Harness) -> None:
+    pings: list[int] = []
+    h.machine.healthcheck = lambda: pings.append(1)
+    h.load_plates(1)
+    h.tick()  # first tick fires the heartbeat
+    assert pings, "heartbeat should ping the external healthcheck"

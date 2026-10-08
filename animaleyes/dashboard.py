@@ -40,7 +40,7 @@ Credentials = Annotated[
     HTTPBasicCredentials | None, Depends(HTTPBasic(auto_error=False, realm="animaleyes"))
 ]
 
-STREAM_POLL_S = 0.1
+STREAM_POLL_S = 0.05  # poll the buffer often enough to pass through higher camera FPS smoothly
 # The page reconnects when a stream ends, so a tab left open on a phone cannot hold a
 # connection through the tunnel forever.
 STREAM_MAX_S = 600
@@ -51,6 +51,8 @@ MAIN_EVENT_KINDS = (
     "veto",
     "feed_failed",
     "close_failed",
+    "rotated_empty_plate",
+    "empty_no_food",
     "wanted_food_none_left",
     "startup",
     "bowie_during_feed",
@@ -77,17 +79,30 @@ def create_app(
     reload_references=None,
     reference_dir: Path | None = None,
     training_dir: Path | None = None,
+    personas=None,
+    themes=None,
     frontend_dist: Path | None = None,
+    ptz=None,
 ) -> FastAPI:
     app = FastAPI(title="animaleyes", docs_url=None, redoc_url=None)
-    ANIMALS = ("grrr", "bowie", "cat")
     index_html = frontend_dist / "index.html" if frontend_dist else None
     PHOTO_SETS = {"reference": reference_dir, "training": training_dir}
     IMG_EXT = (".jpg", ".jpeg", ".png")
 
+    def animal_keys() -> list[str]:
+        # The roster is persona-driven; fall back to the fixed trio when no store is wired (tests).
+        return personas.keys() if personas is not None else ["grrr", "bowie", "cat"]
+
+    # "unlabeled" is a bucket in the training set only: frames capture mode saved that have no
+    # label yet. It's a valid source for listing/viewing/deleting/re-tagging, but never a
+    # re-tag *target* (you tag INTO a real animal).
+    def _valid_bucket(set_name: str, animal: str) -> bool:
+        keys = animal_keys()
+        return animal in (keys + ["unlabeled"] if set_name == "training" else keys)
+
     def photo_dir(set_name: str, animal: str, create: bool = False) -> Path:
         base = PHOTO_SETS.get(set_name)
-        if base is None or animal not in ANIMALS:
+        if base is None or not _valid_bucket(set_name, animal):
             raise HTTPException(status_code=404, detail="unknown photo set or animal")
         d = base / animal
         if create:
@@ -106,7 +121,7 @@ def create_app(
         # Count the photos actually on disk, independent of the active detector (YOLO doesn't
         # track reference images, so reading them off the identifier wrongly showed 0).
         counts: dict[str, int] = {}
-        for a in ANIMALS:
+        for a in animal_keys():
             d = (reference_dir / a) if reference_dir else None
             counts[a] = (
                 sum(1 for p in d.glob("*") if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
@@ -164,11 +179,12 @@ def create_app(
         return {"ok": True}
 
     @app.get("/", response_class=HTMLResponse, dependencies=guarded)
-    def index() -> str:
+    def index() -> HTMLResponse:
         # Serve the built React app; fall back to a minimal page when it isn't built (tests).
-        if index_html and index_html.is_file():
-            return index_html.read_text()
-        return FALLBACK_PAGE
+        html = index_html.read_text() if (index_html and index_html.is_file()) else FALLBACK_PAGE
+        # Never cache the shell — the hashed assets it points at change on every build, so a
+        # cached old index.html would reference assets that no longer exist (blank page).
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
     @app.get("/api/status", dependencies=guarded)
     def status() -> dict[str, Any]:
@@ -201,7 +217,7 @@ def create_app(
             "lid_open": (store.get("lid_actual_open") == "1")
             if store.get("lid_actual_open") is not None
             else (
-                machine.state in ("OPENING", "FEEDING", "CLOSING")
+                machine.state in ("OPENING", "VERIFYING", "FEEDING", "CLOSING")
                 or bool(store.get("lid_manual_open"))
             ),
             "current_plate": store.get_int("current_plate", 0) or None,
@@ -220,12 +236,17 @@ def create_app(
             "llm_cost_today_usd": round(cost, 4),
             "llm_model": settings.LLM_MODEL,
             "identifier": settings.IDENTIFIER,
+            "ptz_available": ptz is not None,
             "last_verdict": verdict,
             "last_llm_at": machine.last_llm_at.isoformat(timespec="seconds")
             if machine.last_llm_at
             else None,
             "reference_counts": ref_counts(),
-            "training_counts": {a: len(list_photos("training", a)) for a in ANIMALS},
+            "training_counts": {
+                a: len(list_photos("training", a)) for a in [*animal_keys(), "unlabeled"]
+            },
+            "personas": [p.to_dict() for p in personas.load()] if personas is not None else [],
+            "capture_mode": settings.CAPTURE_MODE,
             "feeding_since": store.get("opened_at") if machine.state == "FEEDING" else None,
         }
 
@@ -253,6 +274,56 @@ def create_app(
         store.set("plates_updated", 1)
         return {"plates": store.plates()}
 
+    # --- camera pan/tilt (PTZ over ONVIF; moves the camera, not the feeder) ----------
+    PTZ_DIRS = {"up": (0.0, 1.0), "down": (0.0, -1.0), "left": (-1.0, 0.0), "right": (1.0, 0.0)}
+
+    @app.post("/api/ptz/nudge", dependencies=guarded)
+    def ptz_nudge(dir: str) -> dict[str, str]:
+        if ptz is None:
+            raise HTTPException(status_code=503, detail="no camera")
+        if dir not in PTZ_DIRS:
+            raise HTTPException(status_code=400, detail="bad direction")
+        s = machine.settings
+        dx, dy = PTZ_DIRS[dir]
+        try:
+            ptz.nudge(dx * s.PTZ_SPEED, dy * s.PTZ_SPEED, s.PTZ_STEP_MS)
+        except Exception as exc:  # noqa: BLE001 - surface camera errors to the UI
+            raise HTTPException(status_code=502, detail=f"ptz failed: {exc}") from exc
+        return {"ok": dir}
+
+    @app.post("/api/ptz/stop", dependencies=guarded)
+    def ptz_stop() -> dict[str, bool]:
+        if ptz is not None:
+            try:
+                ptz.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        return {"ok": True}
+
+    @app.get("/api/ptz/presets", dependencies=guarded)
+    def ptz_presets() -> dict[str, Any]:
+        if ptz is None:
+            return {"presets": []}
+        try:
+            return {"presets": ptz.presets()}
+        except Exception:  # noqa: BLE001
+            return {"presets": []}
+
+    @app.post("/api/ptz/preset", dependencies=guarded)
+    async def ptz_set_preset(request: Request) -> dict[str, bool]:
+        if ptz is None:
+            raise HTTPException(status_code=503, detail="no camera")
+        name = (await request.json()).get("name", "preset")
+        ptz.set_preset(str(name)[:40])
+        return {"ok": True}
+
+    @app.post("/api/ptz/goto", dependencies=guarded)
+    def ptz_goto(token: str) -> dict[str, bool]:
+        if ptz is None:
+            raise HTTPException(status_code=503, detail="no camera")
+        ptz.goto(token)
+        return {"ok": True}
+
     @app.post("/api/feed-now", dependencies=guarded)
     def feed_now() -> dict[str, str]:
         machine.request_feed_now()
@@ -269,7 +340,7 @@ def create_app(
         return {"ok": f"{action} requested; the state machine runs it on its next tick"}
 
     def _animal_dir(animal: str) -> Path:
-        if animal not in ANIMALS or reference_dir is None:
+        if animal not in animal_keys() or reference_dir is None:
             raise HTTPException(status_code=400, detail="unknown animal")
         d = reference_dir / animal
         d.mkdir(parents=True, exist_ok=True)
@@ -334,6 +405,8 @@ def create_app(
 
     @app.post("/api/photos/{set_name}/{animal}/{name}/retag", dependencies=guarded)
     def photo_retag(set_name: str, animal: str, name: str, to: str) -> dict[str, bool]:
+        if to not in animal_keys():  # you tag INTO a real animal, never back to "unlabeled"
+            raise HTTPException(status_code=400, detail="can only re-tag to a known animal")
         src_dir = photo_dir(set_name, animal)
         src = (src_dir / Path(name).name).resolve()
         if not src.is_file() or src_dir.resolve() not in src.parents:
@@ -342,6 +415,80 @@ def create_app(
         src.rename(dst)
         if set_name == "reference" and reload_references:
             reload_references()
+        return {"ok": True}
+
+    # --- animal personas (roster the detector knows about) ----------------------------
+    @app.get("/api/personas", dependencies=guarded)
+    def personas_list() -> list[dict[str, Any]]:
+        return [p.to_dict() for p in personas.load()] if personas is not None else []
+
+    @app.post("/api/personas", dependencies=guarded)
+    async def personas_upsert(request: Request) -> dict[str, Any]:
+        if personas is None:
+            raise HTTPException(status_code=503, detail="personas unavailable")
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        try:
+            persona = personas.upsert(name, str(body.get("description", "")), body.get("key"))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"no such persona {exc}") from exc
+        # Make the photo folders so uploads/capture have somewhere to land, and rebuild the
+        # detector's cached reference prefix + schema so a new/renamed animal takes effect.
+        for base in (reference_dir, training_dir):
+            if base is not None:
+                (base / persona.key).mkdir(parents=True, exist_ok=True)
+        if reload_references:
+            reload_references()
+        store.add_event(machine.clock(), "persona", f"saved {persona.name}", persona.to_dict())
+        return persona.to_dict()
+
+    # --- custom colour themes (presentation only) -------------------------------------
+    @app.get("/api/themes", dependencies=guarded)
+    def themes_list() -> list[dict[str, Any]]:
+        return [t.to_dict() for t in themes.load()] if themes is not None else []
+
+    @app.post("/api/themes", dependencies=guarded)
+    async def themes_upsert(request: Request) -> dict[str, Any]:
+        if themes is None:
+            raise HTTPException(status_code=503, detail="themes unavailable")
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        try:
+            theme = themes.upsert(name, body.get("colors", {}), body.get("id"))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"no such theme {exc}") from exc
+        return theme.to_dict()
+
+    @app.delete("/api/themes/{theme_id}", dependencies=guarded)
+    def themes_delete(theme_id: str) -> dict[str, bool]:
+        if themes is None:
+            raise HTTPException(status_code=503, detail="themes unavailable")
+        themes.delete(theme_id)
+        return {"ok": True}
+
+    @app.delete("/api/personas/{key}", dependencies=guarded)
+    def personas_delete(key: str) -> dict[str, bool]:
+        if personas is None:
+            raise HTTPException(status_code=503, detail="personas unavailable")
+        try:
+            personas.delete(key)
+        except ValueError as exc:  # the feedable target can't be removed (invariant)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Remove its photos too so a deleted animal doesn't linger in the galleries.
+        for base in (reference_dir, training_dir):
+            d = (base / key) if base else None
+            if d and d.is_dir():
+                for p in d.iterdir():
+                    if p.is_file():
+                        p.unlink()
+                d.rmdir()
+        if reload_references:
+            reload_references()
+        store.add_event(machine.clock(), "persona", f"deleted {key}", {"key": key})
         return {"ok": True}
 
     @app.get("/frame.jpg", dependencies=guarded)

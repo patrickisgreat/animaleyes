@@ -34,11 +34,14 @@ class Settings:
     MOTION_PIXEL_FRACTION: float = 0.02
     MOTION_HOLD_S: int = 20
     MOTION_SOURCE: str = "camera"  # "camera" = ONVIF motion events; "frames" = frame-diff
+    CAMERA_FPS: int = 8  # frames/sec ffmpeg pulls; higher = smoother live view (restart to apply)
     FEED_RETRY_BACKOFF_S: int = 120  # after a failed open, wait before trying to open again
     LID_POLL_S: int = 20  # how often to read the feeder's real lid state (0 = never)
     # Dashboard auth: "tailscale" = trust any device on the tailnet (no password), basic-auth
     # fallback off-tailnet; "basic" = always require the password; "none" = open (don't).
     DASH_AUTH: str = "tailscale"
+    PTZ_SPEED: float = 0.4  # pan/tilt velocity 0..1 for a nudge
+    PTZ_STEP_MS: int = 500  # how long one tap moves the camera
     LLM_MIN_INTERVAL_S: int = 3
     HEARTBEAT_MIN: int = 5
     LLM_MODEL: str = "claude-opus-5"
@@ -57,6 +60,21 @@ class Settings:
     COLLECT_TRAINING: bool = True
     TRAINING_MIN_CONF: float = 0.6
     TRAINING_MIN_GAP_S: int = 5  # don't save more than one crop this often (avoid bursts)
+    # Capture mode: a data-gathering mode (independent of feeding). When on, any motion the
+    # free local detector reads as an animal is saved, unlabelled, to data/training/unlabeled/
+    # for the human to tag. Runs all day regardless of the active window; never touches the
+    # feeder (it only writes image files).
+    CAPTURE_MODE: bool = False
+    CAPTURE_MIN_GAP_S: int = 3  # at most one captured frame this often
+    # Feeding verification: after opening a plate, check with the camera that the served bowl
+    # actually has food. If it's confirmed empty, close it and rotate to the next loaded plate,
+    # so a wrong/empty plate doesn't mean a midnight rescue. Off by default (it moves the tray
+    # based on a vision read, so enable it deliberately once the close-up framing is dialled in).
+    VERIFY_FOOD: bool = False
+    VERIFY_POLL_S: int = 10  # how often to run the food check while verifying
+    VERIFY_EMPTY_CONFIRMATIONS: int = 2  # consecutive "empty" reads before rotating (anti-misfire)
+    VERIFY_TIMEOUT_S: int = 90  # if still unsure after this, stop second-guessing and just feed
+    MAX_ROTATE_FOR_FOOD: int = 2  # cap rotations hunting for food (never churn the whole tray)
     # Per-animal descriptions fed to Claude (editable from the dashboard). These label the
     # reference photos and give the model distinguishing cues; the IR/size guidance is in the
     # system prompt. Keep "only Grrr is fed" explicit.
@@ -146,6 +164,16 @@ class Secrets:
     dash_password: str
     dash_public_url: str
     kasa_camera_mac: str = ""
+    # Email/SMS alerts (optional). SMS = email a carrier gateway address (see .env.example).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    alert_to: str = ""  # comma-separated email and/or carrier-SMS addresses
+    pushover_token: str = ""  # Pushover app token (emergency-priority wake-me alerts)
+    pushover_user: str = ""  # Pushover user/group key
+    healthcheck_url: str = ""  # dead-man's-switch: pinged each heartbeat; alerts if pings stop
 
     @classmethod
     def from_env(cls) -> Secrets:
@@ -161,4 +189,16 @@ class Secrets:
             dash_password=env("DASH_PASSWORD", ""),
             dash_public_url=env("DASH_PUBLIC_URL", "http://localhost:8081").rstrip("/"),
             kasa_camera_mac=env("KASA_CAMERA_MAC", ""),
+            smtp_host=env("SMTP_HOST", ""),
+            smtp_port=int(env("SMTP_PORT", "587") or "587"),
+            smtp_user=env("SMTP_USER", ""),
+            smtp_password=env("SMTP_PASSWORD", ""),
+            smtp_from=env("SMTP_FROM", ""),
+            alert_to=env("ALERT_TO", ""),
+            pushover_token=env("PUSHOVER_TOKEN", ""),
+            pushover_user=env("PUSHOVER_USER", ""),
+            healthcheck_url=env("HEALTHCHECK_URL", ""),
         )
+
+    def alert_recipients(self) -> list[str]:
+        return [r.strip() for r in self.alert_to.split(",") if r.strip()]

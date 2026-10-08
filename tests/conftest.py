@@ -40,14 +40,20 @@ UNSURE = Verdict(animal="unsure", confidence=0.2, at_bowl=False, reason="dark")
 EATING = FeedingVerdict(grrr_at_bowl=True, bowl="food", reason="eating")
 GONE_EMPTY = FeedingVerdict(grrr_at_bowl=False, bowl="empty", reason="gone, bowl empty")
 GONE_FULL = FeedingVerdict(grrr_at_bowl=False, bowl="food", reason="gone, bowl full")
+HAS_FOOD = FeedingVerdict(grrr_at_bowl=True, bowl="food", reason="plate has food")
+NO_FOOD = FeedingVerdict(grrr_at_bowl=False, bowl="empty", reason="plate is empty")
+FOOD_UNSURE = FeedingVerdict(grrr_at_bowl=False, bowl="unsure", reason="can't tell")
 
 
 class FakeLLM:
     def __init__(self) -> None:
         self.identify_result: Verdict = UNSURE
         self.feeding_result: FeedingVerdict = EATING
+        self.verify_result: FeedingVerdict = HAS_FOOD
+        self.verify_results: list[FeedingVerdict] | None = None  # consumed in order if set
         self.identify_calls = 0
         self.feeding_calls = 0
+        self.verify_calls = 0
 
     def identify(self, frames):
         self.identify_calls += 1
@@ -56,6 +62,17 @@ class FakeLLM:
     def feeding_check(self, frames):
         self.feeding_calls += 1
         return self.feeding_result
+
+    def verify_food(self, frames):
+        self.verify_calls += 1
+        if self.verify_results:
+            # Consume in order; the last entry sticks so a steady state is easy to express.
+            return (
+                self.verify_results.pop(0)
+                if len(self.verify_results) > 1
+                else self.verify_results[0]
+            )  # noqa: E501
+        return self.verify_result
 
 
 class FakeFeeder:
@@ -106,6 +123,7 @@ class Harness:
         self.llm = FakeLLM()
         self.feeder = FakeFeeder()
         self.notifier = LogNotifier()
+        self.capture_gate = None  # tests set this to a FakeLLM to exercise capture mode
         self.machine = self.new_machine()
 
     def new_machine(self) -> Machine:
@@ -121,6 +139,8 @@ class Harness:
             clock=self.clock,
             frames_dir=self.tmp_path / "frames",
             dashboard_url="http://dash",
+            capture_gate=self.capture_gate,
+            capture_dir=self.tmp_path / "unlabeled",
         )
 
     def load_plates(self, *plates: int) -> None:

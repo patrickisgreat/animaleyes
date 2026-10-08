@@ -23,8 +23,11 @@ from .events import ReolinkEvents
 from .feeder import DryRunFeeder, FeederError, PetlibroCli
 from .machine import Machine
 from .motion import MotionDetector
-from .notify import SlackNotifier
+from .notify import EmailNotifier, MultiNotifier, PushoverNotifier, SlackNotifier
+from .personas import PersonaStore
+from .ptz import Ptz
 from .store import Store
+from .themes import ThemeStore
 from .vision import ClaudeIdentifier
 
 log = logging.getLogger("animaleyes")
@@ -67,20 +70,16 @@ def _yolo(config: ConfigStore):
     )
 
 
-def _claude(config: ConfigStore, store: Store):
-    def descriptions() -> dict[str, str]:
-        s = config.load()
-        return {"grrr": s.GRRR_DESC, "bowie": s.BOWIE_DESC, "cat": s.CAT_DESC}
-
+def _claude(config: ConfigStore, store: Store, personas: PersonaStore):
     return ClaudeIdentifier(
         DATA_DIR / "reference",
         store,
         model=lambda: config.load().LLM_MODEL,
-        descriptions=descriptions,
+        personas=personas.load,
     )
 
 
-def build_identifier(name: str, config: ConfigStore, store: Store):
+def build_identifier(name: str, config: ConfigStore, store: Store, personas: PersonaStore):
     """Select the detector backend by config. Backends share the Identifier interface, so the
     state machine is unchanged whichever is chosen."""
     if name == "yolo":
@@ -92,23 +91,64 @@ def build_identifier(name: str, config: ConfigStore, store: Store):
         log.info("identifier: cascade (YOLO gate → Claude confirm)")
         return CascadeIdentifier(
             gate=_yolo(config),
-            confirm=_claude(config, store),
+            confirm=_claude(config, store, personas),
             config=config,
             training_dir=DATA_DIR / "training",
         )
     log.info("identifier: Claude (%s)", config.load().LLM_MODEL)
-    return _claude(config, store)
+    return _claude(config, store, personas)
+
+
+def capture_gate(llm, config: ConfigStore):
+    """The free, local detector capture mode uses to decide "is this an animal". Reuse the
+    active backend's YOLO model if there is one (cascade's gate, or a bare YOLO identifier) so
+    we don't load the model twice; otherwise build one. Returns None if YOLO isn't installed
+    (capture mode then quietly does nothing — it exists to feed a YOLO dataset)."""
+    from .cascade import CascadeIdentifier
+    from .yolo import YoloIdentifier
+
+    if isinstance(llm, CascadeIdentifier):
+        return llm.gate
+    if isinstance(llm, YoloIdentifier):
+        return llm
+    try:
+        return _yolo(config)
+    except Exception as exc:  # noqa: BLE001 - absence of a local detector is non-fatal
+        log.warning("capture mode: no local detector available (%s)", exc)
+        return None
+
+
+def _healthcheck(url: str):
+    """A best-effort GET to a dead-man's-switch URL (e.g. healthchecks.io), or None if unset.
+    The external monitor alerts when these stop — the one path that survives the box going down."""
+    if not url:
+        return None
+    import urllib.request
+
+    def ping() -> None:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            resp.read()
+
+    return ping
 
 
 def build(
     secrets: Secrets,
-) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None]:
+) -> tuple[Machine, Camera, ConfigStore, Store, Identifier, ReolinkEvents | None, PersonaStore]:
     config = ConfigStore(DEFAULT_CONFIG_PATH)
     store = Store(DATA_DIR / "db" / "animaleyes.sqlite")
-    frames = FrameBuffer()
+    s0 = config.load()
+    # Seed the persona roster from any descriptions already set in config so dashboard edits
+    # aren't lost on the first run with personas.
+    personas = PersonaStore(
+        DATA_DIR / "personas.json",
+        seed={"grrr": s0.GRRR_DESC, "bowie": s0.BOWIE_DESC, "cat": s0.CAT_DESC},
+    )
+    fps = max(1, s0.CAMERA_FPS)
+    frames = FrameBuffer(size=max(12, fps * 4))  # ~4s of history regardless of fps
     motion = MotionDetector()
-    camera = Camera(secrets, frames, on_frame=motion.feed)
-    llm = build_identifier(config.load().IDENTIFIER, config, store)
+    camera = Camera(secrets, frames, on_frame=motion.feed, fps=fps)
+    llm = build_identifier(s0.IDENTIFIER, config, store, personas)
     events: ReolinkEvents | None = None
     if secrets.kasa_stream_url:
         # Camera-driven motion gate (ONVIF). Keeps the LLM from firing on frame-diff noise.
@@ -118,6 +158,25 @@ def build(
     except FeederError as exc:
         log.warning("real feeder unavailable: %s", exc)
         feeder = UnavailableFeeder(str(exc))  # type: ignore[assignment]
+    # Slack/log always present (it logs when no webhook); email/SMS added when SMTP is set, so
+    # offline/failure alerts reach the phone even with the dashboard closed.
+    email = EmailNotifier(
+        secrets.smtp_host,
+        secrets.smtp_port,
+        secrets.smtp_user,
+        secrets.smtp_password,
+        secrets.smtp_from,
+        secrets.alert_recipients(),
+    )
+    channels = [SlackNotifier(secrets.slack_webhook)]
+    if email.enabled:
+        channels.append(email)
+        log.info("alerts: email/SMS enabled to %s", secrets.alert_recipients())
+    pushover = PushoverNotifier(secrets.pushover_token, secrets.pushover_user)
+    if pushover.enabled:
+        channels.append(pushover)
+        log.info("alerts: Pushover emergency alerts enabled")
+    notifier = MultiNotifier(channels)
     machine = Machine(
         config=config,
         store=store,
@@ -126,13 +185,16 @@ def build(
         llm=llm,
         feeder=feeder,
         dry_feeder=DryRunFeeder(),
-        notifier=SlackNotifier(secrets.slack_webhook),
+        notifier=notifier,
         clock=datetime.now,
         frames_dir=DATA_DIR / "frames",
         dashboard_url=secrets.dash_public_url,
         events=events,
+        capture_gate=capture_gate(llm, config),
+        capture_dir=DATA_DIR / "training" / "unlabeled",
+        healthcheck=_healthcheck(secrets.healthcheck_url),
     )
-    return machine, camera, config, store, llm, events
+    return machine, camera, config, store, llm, events, personas
 
 
 def run_loop(machine: Machine, stop: threading.Event) -> None:
@@ -144,7 +206,7 @@ def run_loop(machine: Machine, stop: threading.Event) -> None:
             log.exception("tick failed")
             if time.monotonic() - last_error_at > LOOP_ERROR_REPEAT_S:
                 last_error_at = time.monotonic()
-                machine.notifier.send("animaleyes loop error, see logs")
+                machine.notifier.alert("animaleyes loop error, see logs")
         stop.wait(TICK_S)
 
 
@@ -157,7 +219,7 @@ def main() -> None:
     secrets = Secrets.from_env()
     if not (secrets.dash_user and secrets.dash_password):
         raise SystemExit("DASH_USER and DASH_PASSWORD must be set")
-    machine, camera, config, store, llm, events = build(secrets)
+    machine, camera, config, store, llm, events, personas = build(secrets)
     if secrets.kasa_stream_url:
         camera.start()
         if events is not None:
@@ -177,7 +239,12 @@ def main() -> None:
         reload_references=llm.reload_references,
         reference_dir=DATA_DIR / "reference",
         training_dir=DATA_DIR / "training",
+        personas=personas,
+        themes=ThemeStore(DATA_DIR / "themes.json"),
         frontend_dist=FRONTEND_DIST,
+        ptz=Ptz(secrets.kasa_stream_url, secrets.kasa_camera_mac)
+        if secrets.kasa_stream_url
+        else None,
     )
     try:
         uvicorn.run(

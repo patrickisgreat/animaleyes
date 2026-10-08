@@ -33,11 +33,21 @@ export type Status = {
   llm_cost_today_usd: number;
   llm_model: string;
   identifier: string;
+  ptz_available: boolean;
   last_verdict: Verdict | null;
   last_llm_at: string | null;
   reference_counts: Record<string, number>;
   training_counts: Record<string, number>;
+  personas: Persona[];
+  capture_mode: boolean;
   feeding_since: string | null;
+};
+
+export type Persona = {
+  key: string;
+  name: string;
+  description: string;
+  feedable: boolean;
 };
 
 export type EventItem = {
@@ -51,7 +61,15 @@ export type EventItem = {
 
 export const ANIMALS = ["grrr", "bowie", "cat"] as const;
 export type Animal = (typeof ANIMALS)[number];
-export const NAMES: Record<string, string> = { grrr: "Grrr", bowie: "Bowie", cat: "the cat" };
+// Fallback display names; the live roster comes from status.personas (see nameMap).
+export const NAMES: Record<string, string> = { grrr: "Grrr", bowie: "Bowie", cat: "Chicken" };
+
+/** Build a key→display-name map from the persona roster, falling back to the static NAMES. */
+export function nameMap(personas?: Persona[]): Record<string, string> {
+  const m: Record<string, string> = { ...NAMES };
+  for (const p of personas || []) m[p.key] = p.name;
+  return m;
+}
 
 async function j<T>(url: string): Promise<T> {
   const r = await fetch(url);

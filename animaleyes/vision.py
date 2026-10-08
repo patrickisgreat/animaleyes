@@ -21,6 +21,7 @@ from PIL import Image
 
 from .camera import Frame
 from .detect import FeedingVerdict, Identifier, Verdict
+from .personas import TARGET_KEY, Persona
 from .store import Store
 
 # Re-exported for backward compatibility: callers still do `from .vision import Verdict, ...`.
@@ -57,48 +58,67 @@ Rules:
 - "at_bowl" is true only when the animal's head is at or in the bowl area, not merely nearby.
 - Answer with a single JSON object matching the schema you were given, nothing else."""
 
-IDENTIFY_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "animal": {"type": "string", "enum": ["grrr", "bowie", "cat", "none", "unsure"]},
-        # The structured-output API rejects minimum/maximum on numbers; the prompt states the
-        # 0..1 range and the machine clamps when reading confidence.
-        "confidence": {"type": "number"},
-        "at_bowl": {"type": "boolean"},
-        "other_animals_present": {
-            "type": "array",
-            "items": {"type": "string", "enum": ["grrr", "bowie", "cat"]},
-        },
-        "reason": {"type": "string"},
-    },
-    "required": ["animal", "confidence", "at_bowl", "other_animals_present", "reason"],
-    "additionalProperties": False,
-}
 
-FEEDING_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "grrr_at_bowl": {"type": "boolean"},
-        "bowl": {"type": "string", "enum": ["food", "empty", "unsure"]},
-        "other_animals_present": {
-            "type": "array",
-            "items": {"type": "string", "enum": ["bowie", "cat"]},
+def identify_schema(keys: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "animal": {"type": "string", "enum": [*keys, "none", "unsure"]},
+            # The structured-output API rejects minimum/maximum on numbers; the prompt states
+            # the 0..1 range and the machine clamps when reading confidence.
+            "confidence": {"type": "number"},
+            "at_bowl": {"type": "boolean"},
+            "other_animals_present": {"type": "array", "items": {"type": "string", "enum": keys}},
+            "reason": {"type": "string"},
         },
-        "reason": {"type": "string"},
-    },
-    "required": ["grrr_at_bowl", "bowl", "other_animals_present", "reason"],
-    "additionalProperties": False,
-}
+        "required": ["animal", "confidence", "at_bowl", "other_animals_present", "reason"],
+        "additionalProperties": False,
+    }
 
-IDENTIFY_QUESTION = (
-    "Which animal, if any, is in the most recent frames, and is it at the bowl? "
-    "List any other animals visible in other_animals_present."
-)
-FEEDING_QUESTION = (
-    "The feeder lid is open. Is the small black dog (Grrr) still at the bowl? "
-    "Is there still food visible in the open bowl, or has it been eaten? "
-    "List Bowie or the cat in other_animals_present if they are visible."
-)
+
+def feeding_schema(other_keys: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "grrr_at_bowl": {"type": "boolean"},
+            "bowl": {"type": "string", "enum": ["food", "empty", "unsure"]},
+            "other_animals_present": {
+                "type": "array",
+                "items": {"type": "string", "enum": other_keys},
+            },
+            "reason": {"type": "string"},
+        },
+        "required": ["grrr_at_bowl", "bowl", "other_animals_present", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def identify_question(target_name: str) -> str:
+    return (
+        "Which animal, if any, is in the most recent frames, and is it at the bowl? "
+        f"The animal that may be fed is {target_name}. "
+        "List any other animals visible in other_animals_present."
+    )
+
+
+def feeding_question(target_name: str) -> str:
+    return (
+        f"The feeder lid is open. Is {target_name} (the small black dog) still at the bowl? "
+        "Is there still food visible in the open bowl, or has it been eaten? "
+        "List any other animals in other_animals_present if they are visible."
+    )
+
+
+def verify_question(target_name: str) -> str:
+    return (
+        "The feeder lid just opened to serve a plate. Look only at the bowl under the open lid "
+        "and judge what was SERVED, ignoring the animal: set bowl='food' only if the bowl clearly "
+        "contains wet food, bowl='empty' if the bowl is clearly bare/empty (a plate with no "
+        "food), and bowl='unsure' if you cannot tell (dark, obscured, blurry). When unsure, say "
+        "'unsure' — do NOT guess 'empty', because that would rotate the tray and waste a good "
+        f"plate. Set grrr_at_bowl true if {target_name} is eating from it."
+    )
+
 
 # USD per million tokens: (input, output). Cache writes with a 1h TTL cost 2x input,
 # cache reads cost 0.1x input. Used for the dashboard estimate only.
@@ -141,22 +161,20 @@ def image_block(jpeg: bytes) -> dict[str, Any]:
 
 
 def load_reference_blocks(
-    reference_dir: Path, descriptions: dict[str, str] | None = None
+    reference_dir: Path, personas: list[Persona]
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Content blocks for every reference photo, grouped and labelled per animal."""
-    descriptions = descriptions or ANIMAL_DESCRIPTIONS
+    """Content blocks for every reference photo, grouped and labelled per persona."""
     blocks: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
-    for animal in ANIMALS:
+    for persona in personas:
         paths = sorted(
             p
-            for p in (reference_dir / animal).glob("*")
+            for p in (reference_dir / persona.key).glob("*")
             if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
         )
-        counts[animal] = len(paths)
-        blocks.append(
-            {"type": "text", "text": f"Reference photos of {descriptions.get(animal, animal)}"}
-        )
+        counts[persona.key] = len(paths)
+        label = persona.description or persona.name
+        blocks.append({"type": "text", "text": f"Reference photos of {label}"})
         for path in paths:
             blocks.append(image_block(to_jpeg(path.read_bytes())))
         if not paths:
@@ -179,35 +197,55 @@ class ClaudeIdentifier:
         model: Callable[[], str],
         clock: Callable[[], datetime] = datetime.now,
         client: anthropic.Anthropic | None = None,
-        descriptions: Callable[[], dict[str, str]] | None = None,
+        personas: Callable[[], list[Persona]] | None = None,
     ):
         self.reference_dir = reference_dir
         self.store = store
         self.model = model
         self.clock = clock
         self.client = client or anthropic.Anthropic()
-        self.descriptions = descriptions or (lambda: ANIMAL_DESCRIPTIONS)
+        self.personas = personas or (lambda: [])
         self.reference_blocks: list[dict[str, Any]] = []
         self.reference_counts: dict[str, int] = {}
-        self._desc_used: dict[str, str] | None = None
+        self._personas_used: list[dict] | None = None
+        self.identify_schema: dict[str, Any] = identify_schema([])
+        self.feeding_schema: dict[str, Any] = feeding_schema([])
+        self.target_name: str = "Grrr"
         self.reload_references()
 
     def reload_references(self) -> None:
-        desc = self.descriptions()
+        personas = self.personas()
         self.reference_blocks, self.reference_counts = load_reference_blocks(
-            self.reference_dir, desc
+            self.reference_dir, personas
         )
-        self._desc_used = dict(desc)
+        keys = [p.key for p in personas]
+        other_keys = [p.key for p in personas if p.key != TARGET_KEY]
+        self.identify_schema = identify_schema(keys)
+        self.feeding_schema = feeding_schema(other_keys)
+        self.target_name = next((p.name for p in personas if p.key == TARGET_KEY), "Grrr")
+        self._personas_used = [p.to_dict() for p in personas]
         log.info("reference photos: %s", self.reference_counts)
 
+    def _maybe_reload(self) -> None:
+        if [p.to_dict() for p in self.personas()] != self._personas_used:
+            self.reload_references()  # a dashboard edit → rebuild the cached prefix + schemas
+
     def identify(self, frames: list[Frame]) -> Verdict:
-        if self.descriptions() != self._desc_used:  # a dashboard edit → rebuild the cached prefix
-            self.reload_references()
-        data = self._ask("identify", frames, IDENTIFY_QUESTION, IDENTIFY_SCHEMA)
+        self._maybe_reload()
+        q = identify_question(self.target_name)
+        data = self._ask("identify", frames, q, self.identify_schema)
         return Verdict.from_json(data) if data else Verdict(reason="llm call failed")
 
     def feeding_check(self, frames: list[Frame]) -> FeedingVerdict:
-        data = self._ask("feeding", frames, FEEDING_QUESTION, FEEDING_SCHEMA)
+        self._maybe_reload()
+        q = feeding_question(self.target_name)
+        data = self._ask("feeding", frames, q, self.feeding_schema)
+        return FeedingVerdict.from_json(data) if data else FeedingVerdict(reason="llm call failed")
+
+    def verify_food(self, frames: list[Frame]) -> FeedingVerdict:
+        self._maybe_reload()
+        # "llm call failed" -> bowl defaults to "unsure", so a failed call never rotates the tray.
+        data = self._ask("verify", frames, verify_question(self.target_name), self.feeding_schema)
         return FeedingVerdict.from_json(data) if data else FeedingVerdict(reason="llm call failed")
 
     def _ask(

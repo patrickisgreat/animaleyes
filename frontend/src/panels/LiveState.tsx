@@ -24,9 +24,16 @@ export function StateBanner({ s }: { s: Status | null }) {
 
 export function LiveView({ s }: { s: Status | null }) {
   const img = useRef<HTMLImageElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState(true);
 
   const start = () => { if (img.current) img.current.src = "/stream.mjpg?t=" + Date.now(); };
+  const fullscreen = () => {
+    const el = box.current;
+    if (!el) return;
+    if (document.fullscreenElement) document.exitFullscreen();
+    else el.requestFullscreen?.().catch(() => {});
+  };
   useEffect(() => {
     if (live) start();
     const onVis = () => { if (live && !document.hidden) start(); };
@@ -42,11 +49,14 @@ export function LiveView({ s }: { s: Status | null }) {
   const v = s ? verdictText(s) : { who: "Waiting…", why: "" };
   return (
     <Card>
-      <div className="relative rounded-xl overflow-hidden bg-black aspect-video">
+      <div
+        ref={box}
+        className="live-box relative rounded-xl overflow-hidden bg-black aspect-video"
+      >
         <img
           ref={img}
           alt="live camera"
-          className="w-full h-full object-cover block"
+          className="w-full h-full object-contain block"
           onError={() => live && setTimeout(start, 3000)}
         />
         {live && (
@@ -54,12 +64,12 @@ export function LiveView({ s }: { s: Status | null }) {
             ● LIVE
           </span>
         )}
-        <button
-          onClick={() => setLive((x) => !x)}
-          className="btn btn-sm absolute top-2.5 right-2.5 bg-black/60 backdrop-blur"
-        >
-          {live ? "Pause" : "Resume"}
-        </button>
+        <div className="absolute top-2.5 right-2.5 flex gap-1.5">
+          <button onClick={() => setLive((x) => !x)} className="btn btn-sm bg-black/60 backdrop-blur">
+            {live ? "Pause" : "Resume"}
+          </button>
+          <button onClick={fullscreen} className="btn btn-sm bg-black/60 backdrop-blur" title="fullscreen">⛶</button>
+        </div>
         <div className="absolute left-2.5 right-2.5 bottom-2.5 bg-black/70 backdrop-blur px-3 py-2 rounded-[10px]">
           <div className="font-bold text-sm">{v.who}</div>
           {v.why && <div className="text-muted text-xs mt-0.5">{v.why}</div>}
