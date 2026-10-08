@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from dataclasses import dataclass
 
 from .camera import Frame
@@ -104,7 +105,9 @@ class YoloIdentifier:
         img = Image.open(io.BytesIO(frame.jpeg)).convert("RGB")
         w, h = img.size
         area = float(w * h) or 1.0
+        started = time.perf_counter()
         results = self._ensure_model().predict(img, verbose=False)
+        took_ms = (time.perf_counter() - started) * 1000
         dets: list[Detection] = []
         for r in results:
             names = r.names
@@ -115,6 +118,12 @@ class YoloIdentifier:
                 x1, y1, x2, y2 = (float(v) for v in b.xyxy[0])
                 frac = max(0.0, (x2 - x1) * (y2 - y1)) / area
                 dets.append(Detection(label=label, confidence=float(b.conf[0]), box_fraction=frac))
+        # One line per look, so a missed visit can be explained afterwards: what the gate saw
+        # (including detections under YOLO_MIN_CONF, which it then ignores) and how long it took.
+        seen = ", ".join(f"{d.label} {d.confidence:.2f} box {d.box_fraction:.2f}" for d in dets)
+        log.info(
+            "yolo saw: %s (%.0f ms, min conf %.2f)", seen or "nothing", took_ms, self.cfg.min_conf
+        )
         return dets
 
     def identify(self, frames: list[Frame]) -> Verdict:
