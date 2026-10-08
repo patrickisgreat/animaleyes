@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from animaleyes.detect import Verdict
 from tests.conftest import (
     BOWIE,
     CAT,
@@ -12,6 +13,8 @@ from tests.conftest import (
     GRRR,
     HAS_FOOD,
     NO_FOOD,
+    UNSURE,
+    FakeLLM,
     Harness,
 )
 
@@ -151,11 +154,64 @@ def test_veto_in_watching_for_bowie_and_cat(h: Harness) -> None:
     h.llm.identify_result = BOWIE
     h.run(seconds=8)
     assert h.state() == "WATCHING"
-    assert len(h.events("veto")) == 1
-    assert h.events("veto")[0].data["animal"] == "bowie"
+    assert [e.data["animal"] for e in h.events("veto")] == ["bowie"]
+    # The cat right after Bowie still gets its own event; the repeat limit is per animal.
     h.llm.identify_result = CAT
     h.run(seconds=8)
-    assert len(h.events("veto")) == 1  # rate-limited within VETO_REPEAT_S
+    assert sorted(e.data["animal"] for e in h.events("veto")) == ["bowie", "cat"]
+    h.run(seconds=60)
+    assert len(h.events("veto")) == 2  # same cat lingering: rate-limited within VETO_REPEAT_S
+    assert any("veto: cat" in s for s in h.notifier.sent)
+    assert h.feeder.opens == []
+
+
+def test_one_confident_cat_read_is_enough_to_log(h: Harness) -> None:
+    # A cat that glances into the camera once, then an unsure frame, is still recorded.
+    h.load_plates(1)
+    h.tick()
+    h.llm.identify_result = CAT
+    h.tick()
+    h.llm.identify_result = UNSURE
+    h.run(seconds=10)
+    assert len(h.events("veto")) == 1
+    assert h.events("veto")[0].frames
+
+
+def test_a_shaky_cat_read_needs_a_second_one(h: Harness) -> None:
+    h.load_plates(1)
+    h.tick()
+    h.llm.identify_result = Verdict(animal="cat", confidence=0.4, at_bowl=True, reason="maybe")
+    h.tick()
+    assert h.events("veto") == []
+    h.run(seconds=4)
+    assert len(h.events("veto")) == 1
+
+
+def test_cat_beside_grrr_is_logged_and_blocks_the_open(h: Harness) -> None:
+    h.load_plates(1)
+    h.llm.identify_result = Verdict(
+        animal="grrr", confidence=0.95, at_bowl=True, other_animals_present=["cat"], reason="both"
+    )
+    h.run(seconds=12)
+    assert [e.data["animal"] for e in h.events("veto")] == ["cat"]
+    assert h.feeder.opens == []
+
+
+def test_lingering_cat_writes_frames_only_for_logged_events(h: Harness) -> None:
+    h.load_plates(1)
+    h.llm.identify_result = CAT
+    h.run(seconds=60)
+    assert len(h.events("veto")) == 1
+    assert len(list(h.machine.frames_dir.glob("*veto_cat*"))) == len(h.events("veto")[0].frames)
+
+
+def test_done_still_logs_the_cat(h: Harness) -> None:
+    h.tick(motion=False)
+    assert h.state() == "DONE"
+    h.llm.identify_result = CAT
+    h.run(seconds=10)
+    assert [e.data["animal"] for e in h.events("sighting")] == ["cat"]
+    assert h.events("wanted_food_none_left") == []
     assert h.feeder.opens == []
 
 
@@ -524,3 +580,58 @@ def test_heartbeat_pings_the_dead_mans_switch(h: Harness) -> None:
     h.load_plates(1)
     h.tick()  # first tick fires the heartbeat
     assert pings, "heartbeat should ping the external healthcheck"
+
+
+def watching_harness(tmp_path, start: datetime = datetime(2026, 9, 24, 12, 0)) -> Harness:
+    """A harness with the free local detector wired in, at noon (off hours) by default."""
+    h = Harness(tmp_path, start=start)
+    h.capture_gate = FakeLLM()
+    h.machine = h.new_machine()
+    return h
+
+
+def test_watch_logs_the_cat_off_hours_without_motion_or_paid_calls(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.load_plates(1)
+    h.capture_gate.identify_result = CAT
+    h.run(seconds=10, motion=False)  # a cat sitting still, staring
+    assert h.state() == "OUTSIDE_WINDOW"
+    assert [e.data["animal"] for e in h.events("sighting")] == ["cat"]
+    assert h.events("sighting")[0].frames
+    assert h.machine.last_verdict.animal == "cat"  # the dashboard sees her too
+    assert h.llm.identify_calls == 0  # nothing paid off hours
+    assert h.feeder.calls == []
+
+
+def test_watch_logs_grrr_off_hours_but_never_opens(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.load_plates(1)
+    h.capture_gate.identify_result = GRRR
+    h.run(seconds=60)
+    assert [e.data["animal"] for e in h.events("sighting")] == ["grrr"]
+    assert h.state() == "OUTSIDE_WINDOW"
+    assert h.feeder.calls == []
+
+
+def test_watch_runs_in_cooldown_and_idle_but_not_while_watching(tmp_path) -> None:
+    h = watching_harness(tmp_path, start=datetime(2026, 9, 24, 22, 0))
+    h.load_plates(1)
+    h.tick(motion=False)
+    assert h.state() == "IDLE"
+    h.capture_gate.identify_result = CAT
+    h.tick(motion=False, seconds=2)
+    assert [e.data["animal"] for e in h.events("sighting")] == ["cat"]
+    calls = h.capture_gate.identify_calls
+    h.run(seconds=10)  # motion -> WATCHING: the machine's own check takes over
+    assert h.state() == "WATCHING"
+    assert h.capture_gate.identify_calls == calls
+
+
+def test_watch_respects_interval_and_switch(tmp_path) -> None:
+    h = watching_harness(tmp_path)
+    h.config.update({"WATCH_INTERVAL_S": 5})
+    h.run(seconds=10, motion=False)
+    assert h.capture_gate.identify_calls == 2
+    h.config.update({"ALWAYS_WATCH": False})
+    h.run(seconds=10, motion=False)
+    assert h.capture_gate.identify_calls == 2

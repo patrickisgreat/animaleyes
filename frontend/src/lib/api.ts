@@ -35,6 +35,7 @@ export type Status = {
   identifier: string;
   ptz_available: boolean;
   last_verdict: Verdict | null;
+  last_verdict_age_s: number | null;
   last_llm_at: string | null;
   reference_counts: Record<string, number>;
   training_counts: Record<string, number>;
