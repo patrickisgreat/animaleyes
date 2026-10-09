@@ -50,9 +50,10 @@ class CascadeIdentifier:
 
     def identify(self, frames: list[Frame]) -> Verdict:
         v = self.gate.identify(frames)
-        # YOLO sees a dog (grrr/bowie by its rough size guess) → ask Claude who it really is.
-        if v.animal in ("grrr", "bowie"):
-            log.info("cascade: gate sees a dog -> asking Claude who it is")
+        # Any dog (whoever the gate thinks it is) or an animal it can't name → Claude decides.
+        # Only "cat" and "none" are settled locally: neither can lead to a feed.
+        if v.animal not in ("none", "cat"):
+            log.info("cascade: gate sees %s -> asking Claude who it is", v.animal)
             return self._confirm(frames)
         # The gate sees nothing, but identify() only runs while something is moving at the
         # bowl — so it may simply be blind. Let Claude look, on a throttle.

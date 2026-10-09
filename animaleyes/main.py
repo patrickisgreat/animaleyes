@@ -66,7 +66,12 @@ def _yolo(config: ConfigStore):
     s = config.load()
     return YoloIdentifier(
         s.YOLO_MODEL,
-        YoloConfig(min_conf=s.YOLO_MIN_CONF, grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION),
+        YoloConfig(
+            min_conf=s.YOLO_MIN_CONF,
+            grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION,
+            classifier_path=s.YOLO_CLASSIFIER,
+            cls_min_conf=s.YOLO_CLS_MIN_CONF,
+        ),
     )
 
 
