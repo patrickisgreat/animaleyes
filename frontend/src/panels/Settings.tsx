@@ -10,6 +10,8 @@ const CONTROLS: Ctl[] = [
   { key: "DRY_RUN", label: "Dry run (don't move feeder)", type: "bool", group: "Schedule" },
   { key: "IDENTIFIER", label: "Detector", type: "select", group: "Identification", opts: ["cascade", "yolo", "claude"] },
   { key: "GRRR_MIN_CONF", label: "Min confidence for Grrr", type: "number", group: "Identification" },
+  { key: "YOLO_CLASSIFIER", label: "Local identity model (path; blank = size rule)", type: "text", group: "Identification" },
+  { key: "YOLO_CLS_MIN_CONF", label: "Local identity min confidence", type: "number", group: "Identification" },
   { key: "CONFIRMATIONS_REQUIRED", label: "Confirmations before feeding", type: "number", group: "Identification" },
   { key: "OPEN_REQUIRES_AT_BOWL", label: "Require head-in-bowl to open", type: "bool", group: "Identification" },
   { key: "CASCADE_PROBE_S", label: "Ask Claude when the local detector sees nothing, every (sec, 0 = never)", type: "number", group: "Identification" },
