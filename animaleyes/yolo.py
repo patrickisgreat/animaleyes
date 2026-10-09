@@ -26,6 +26,18 @@ log = logging.getLogger(__name__)
 DOG, CAT, PERSON = "dog", "cat", "person"
 
 
+CROP_MARGIN = 0.12  # pad a detection box by this fraction of its size before classifying
+
+
+def crop_box(img, box: tuple[float, float, float, float]):
+    """Crop a detection box out of a PIL image with a margin, clamped to the frame. Shared by
+    training and inference so the classifier sees the same framing both times."""
+    x1, y1, x2, y2 = box
+    mx, my = (x2 - x1) * CROP_MARGIN, (y2 - y1) * CROP_MARGIN
+    w, h = img.size
+    return img.crop((max(0, int(x1 - mx)), max(0, int(y1 - my)), min(w, int(x2 + mx)), min(h, int(y2 + my))))
+
+
 @dataclass
 class Detection:
     label: str

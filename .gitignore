@@ -28,3 +28,6 @@ data/themes.json
 # React dashboard build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Trained classifier weights + ultralytics run dirs (large, rebuilt by tools/train_classifier.py)
+data/models/
