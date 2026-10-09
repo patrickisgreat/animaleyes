@@ -61,6 +61,10 @@ class Settings:
     CASCADE_STICKY_S: int = 20
     YOLO_MODEL: str = "yolo11n.pt"  # pretrained COCO; dog/cat/person
     YOLO_MIN_CONF: float = 0.45
+    # Identity classifier trained from the tagged frames (tools/train_classifier.py). Empty =
+    # the size rule (big box = Bowie), which is wrong whenever Grrr is close to the camera.
+    YOLO_CLASSIFIER: str = ""  # e.g. data/models/animals-cls.pt
+    YOLO_CLS_MIN_CONF: float = 0.6  # below this a dog is "unsure" (never fed; cascade asks Claude)
     GRRR_MAX_BOX_FRACTION: float = 0.5  # YOLO-only mode: dog box this fraction or smaller = Grrr
     # The open decision needs Grrr confirmed at the bowl. The bowl is closed/empty before a
     # feed, so she hovers near it rather than head-in-bowl; requiring at_bowl blocks nearly

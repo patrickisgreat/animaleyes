@@ -139,3 +139,10 @@ def test_feeding_presence_stays_free_when_the_gate_sees_her():
     confirm = _Fake(Verdict(animal="grrr"))
     CascadeIdentifier(gate, confirm).feeding_check([])
     assert getattr(confirm, "feeding_calls", 0) == 0
+
+
+def test_an_animal_the_gate_cannot_name_goes_to_claude():
+    gate = _Fake(Verdict(animal="unsure", confidence=0.4))
+    confirm = _Fake(Verdict(animal="grrr", confidence=0.9))
+    assert CascadeIdentifier(gate, confirm).identify([]).animal == "grrr"
+    assert confirm.calls == 1
