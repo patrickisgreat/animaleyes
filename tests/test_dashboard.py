@@ -102,7 +102,7 @@ def test_status_and_frame(h: Harness) -> None:
 def test_setting_plates_and_config_reach_the_machine(h: Harness) -> None:
     c = client(h)
     h.tick(motion=False)
-    assert h.state() == "DONE"
+    assert h.state() == "IDLE"  # nothing marked yet, but armed: it will try the bowls
     r = c.post("/api/plates", json={"loaded": [2, 3]})
     assert r.json()["plates"] == {"1": "empty", "2": "loaded", "3": "loaded"}
     h.tick(motion=False)

@@ -87,6 +87,9 @@ export function Plates({ s, refresh }: { s: Status | null; refresh: () => void }
       <div className="mt-3"><Button variant="primary" sm onClick={save}>Save loaded plates</Button></div>
       <div className="text-muted text-xs mt-2.5">
         Mark which bowls you filled. Saving resets the night's count and re‑arms the feeder.
+        If you forget, the feeder still tries: when Grrr shows up it opens the bowl under the lid,
+        checks it for food, and moves to the next bowl if that one is empty.
+        {s?.plates_tried?.length ? <> Tried this window: {s.plates_tried.join(", ")}.</> : null}
       </div>
     </Card>
   );

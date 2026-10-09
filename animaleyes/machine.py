@@ -12,6 +12,7 @@ protocols, so the whole thing runs under test with fakes.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import deque
 from collections.abc import Callable
@@ -183,12 +184,16 @@ class Machine:
 
     def _tick_outside_window(self, now: datetime) -> None:
         self.store.set("feeds_this_window", 0)
+        self.store.set("plates_tried", "[]")  # a new window: every bowl may have been refilled
+        # Dashboard marks count for the window they were made in, or while a bowl is still
+        # marked loaded. Nothing marked = the human may have refilled without telling us.
+        self.store.set("plates_marked", "1" if self.store.loaded_plates() else None)
         self.verdicts.clear()
         self._transition(State.IDLE, "active window started")
 
     def _tick_idle(self, now: datetime) -> None:
-        if not self.store.loaded_plates():
-            self._transition(State.DONE, "no loaded plates")
+        if not self._candidate_plates():
+            self._transition(State.DONE, self._no_plates_reason())
             return
         if self._motion(now):
             self.verdicts.clear()
@@ -220,9 +225,10 @@ class Machine:
         mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
         frames = self._save_frames("open")
         try:
-            plate = self._plate_under_lid(feeder)
+            plate = self._plate_under_lid(feeder, self._candidate_plates())
             self.store.set("opening_plate", plate)
             self.store.set("current_plate", plate)
+            self._mark_tried(plate)  # persisted before the open, so a crash can't retry it
             feeder.open_now(plate)
         except FeederError as exc:
             # Back off so a failing feeder isn't hammered every tick (which drains the device
@@ -256,11 +262,13 @@ class Machine:
                 "plate": plate,
                 "mode": mode,
                 "loaded_plates": loaded,
+                "plates_tried": self.plates_tried(),
                 "feeds_this_window": self.store.get_int("feeds_this_window"),
             },
             frames,
         )
-        self._notify(f"OPENED plate {plate} ({mode}): {trigger}. Loaded plates: {loaded}", event_id)
+        marked = f"Loaded plates: {loaded}" if loaded else "no bowl was marked loaded; trying it"
+        self._notify(f"OPENED plate {plate} ({mode}): {trigger}. {marked}", event_id)
         if self.settings.VERIFY_FOOD:
             self._transition(State.VERIFYING, "lid open, verifying food", plate=plate)
         else:
@@ -288,6 +296,10 @@ class Machine:
         self.last_verdict_at = now
         self.last_feeding_verdict = verdict
         plate = self.store.get_int("feeding_plate", 0)
+        if verdict.grrr_at_bowl:
+            # She is eating while we check the plate: that is presence, so the leave timer
+            # must not run from the moment the lid opened.
+            self.store.set("grrr_last_seen_at", now.isoformat())
 
         if verdict.bowl == "food":
             self.store.set("verify_empty_count", 0)
@@ -313,13 +325,13 @@ class Machine:
         # The served plate is empty — record it so it's not offered again (updates the dashboard).
         if plate:
             self.store.set_plate(plate, "empty", now)
-        others_loaded = [p for p in self.store.loaded_plates() if p != plate]
+        others = [p for p in self._candidate_plates() if p != plate]
         frames = self._save_frames("empty_plate")
-        if rotations >= self.settings.MAX_ROTATE_FOR_FOOD or not others_loaded:
+        if rotations >= self.settings.MAX_ROTATE_FOR_FOOD or not others:
             reason = (
                 "served plate empty; rotation cap reached"
                 if rotations >= self.settings.MAX_ROTATE_FOR_FOOD
-                else "served plate empty; no other loaded plate to try"
+                else "served plate empty; no other plate left to try"
             )
             event_id = self.store.add_event(
                 now, "empty_no_food", reason, {"plate": plate, "rotations": rotations}, frames
@@ -360,7 +372,8 @@ class Machine:
         feeder = self._feeder()
         feeder.close()
         self.store.set("lid_actual_open", 0)
-        plate = self._plate_under_lid(feeder)  # rotates (closed) to a loaded plate
+        plate = self._plate_under_lid(feeder, self._candidate_plates())  # rotates while closed
+        self._mark_tried(plate)
         feeder.open_now(plate)
         self.store.set("lid_actual_open", 1)
         self.store.set("current_plate", plate)
@@ -414,8 +427,9 @@ class Machine:
         # bowl is offered again. Wrongly advancing costs one bowl; wrongly staying starves.
         plate_status = "loaded" if bowl == "food" else "eaten"
         error = None
+        close_sent = True
         try:
-            feeder.close()
+            close_sent = feeder.close() is not False
         except FeederError as exc:
             error = str(exc)
         if plate:
@@ -428,15 +442,19 @@ class Machine:
             "session_s": session_s,
             "loaded_plates": self.store.loaded_plates(),
             "mode": "DRY_RUN" if self.settings.DRY_RUN else "LIVE",
+            # False = the feeder said no lid was open, so nothing was sent. Usually it closed
+            # itself; if the lid is in fact open, the feeder and its cloud are out of sync.
+            "close_sent": close_sent,
         }
         frames = self._save_frames("close")
         if error:
             event_id = self.store.add_event(now, "close_failed", error, data, frames)
             self._notify(f"CLOSE FAILED after {session_s}s: {error}", event_id, urgent=True)
         else:
-            event_id = self.store.add_event(now, "close", f"bowl {bowl}", data, frames)
+            how = "" if close_sent else " (feeder reported the lid already closed; nothing sent)"
+            event_id = self.store.add_event(now, "close", f"bowl {bowl}{how}", data, frames)
             self._notify(
-                f"CLOSED plate {plate} after {session_s}s, bowl {bowl} -> {plate_status}. "
+                f"CLOSED plate {plate} after {session_s}s, bowl {bowl} -> {plate_status}{how}. "
                 f"Loaded plates left: {self.store.loaded_plates()}",
                 event_id,
             )
@@ -448,14 +466,14 @@ class Machine:
         last_open = self._when("last_open_at")
         if last_open and now - last_open < timedelta(minutes=self.settings.MIN_GAP_MIN):
             return
-        if self.store.loaded_plates():
+        if self._candidate_plates():
             self._transition(State.IDLE, f"MIN_GAP_MIN ({self.settings.MIN_GAP_MIN}) elapsed")
         else:
-            self._transition(State.DONE, "no loaded plates left")
+            self._transition(State.DONE, self._no_plates_reason())
 
     def _tick_done(self, now: datetime) -> None:
-        if self.store.loaded_plates():
-            self._transition(State.IDLE, "plates loaded")
+        if self._candidate_plates():
+            self._transition(State.IDLE, "plates available")
             return
         motion = self._motion(now)
         if not motion:
@@ -507,8 +525,8 @@ class Machine:
         )
 
     def _open_blocker(self, now: datetime) -> str | None:
-        if not self.store.loaded_plates():
-            return "no loaded plates"
+        if not self._candidate_plates():
+            return self._no_plates_reason()
         last_open = self._when("last_open_at")
         if last_open and now - last_open < timedelta(minutes=self.settings.MIN_GAP_MIN):
             return f"last open {int((now - last_open).total_seconds() // 60)} min ago < MIN_GAP_MIN"
@@ -556,18 +574,49 @@ class Machine:
                 dedupe=f"{kind}:{animal}",
             )
 
-    def _plate_under_lid(self, feeder: Feeder) -> int:
-        """Rotate until a loaded plate is under the lid. Manual feeds accept any plate."""
+    # plates -------------------------------------------------------------
+    def plates_tried(self) -> list[int]:
+        """Bowls opened so far this window (persisted; reset when a window starts)."""
+        try:
+            return [int(p) for p in json.loads(self.store.get("plates_tried") or "[]")]
+        except (ValueError, TypeError):
+            return []
+
+    def _mark_tried(self, plate: int) -> None:
+        tried = self.plates_tried()
+        if plate not in tried:
+            self.store.set("plates_tried", json.dumps(tried + [plate]))
+
+    def _candidate_plates(self) -> list[int]:
+        """Bowls the machine may open now. Marked-loaded bowls win, exactly as marked. With nothing
+        marked for this window (the human may have refilled without saying so), every bowl not yet
+        tried this window is a candidate, so a forgotten tick box can't mean a hungry dog."""
         loaded = self.store.loaded_plates()
+        if loaded:
+            return loaded
+        if self.store.get("plates_marked") or not self.settings.FEED_WITHOUT_LOADED_PLATES:
+            return []
+        tried = self.plates_tried()
+        return [p for p in (1, 2, 3) if p not in tried]
+
+    def _no_plates_reason(self) -> str:
+        if self.store.get("plates_marked") or not self.settings.FEED_WITHOUT_LOADED_PLATES:
+            return "no loaded plates"
+        return "every bowl tried this window"
+
+    def _plate_under_lid(self, feeder: Feeder, candidates: list[int]) -> int:
+        """Rotate until one of `candidates` is under the lid. No candidates = any plate (manual)."""
         plate = feeder.current_plate()
-        if not loaded:
+        if not candidates:
             return plate
         for _ in range(3):
-            if plate in loaded:
+            if plate in candidates:
                 return plate
             feeder.rotate()
             plate = feeder.current_plate()
-        raise FeederError(f"no loaded plate reachable; tray reports plate {plate}, loaded {loaded}")
+        raise FeederError(
+            f"no candidate plate reachable; tray reports plate {plate}, want {candidates}"
+        )
 
     def _log_once(
         self,
@@ -743,6 +792,8 @@ class Machine:
         if self.store.get("plates_updated"):
             self.store.set("plates_updated", None)
             self.store.set("feeds_this_window", 0)
+            self.store.set("plates_tried", "[]")
+            self.store.set("plates_marked", "1")  # an explicit save: honour it as marked
             if self.state in (State.DONE, State.COOLDOWN, State.WATCHING, State.IDLE):
                 self.store.add_event(
                     now,
@@ -773,14 +824,27 @@ class Machine:
         mode = "DRY_RUN" if self.settings.DRY_RUN else "LIVE"
         try:
             if action == "open":
-                plate = self._plate_under_lid(feeder)
+                plate = self._plate_under_lid(feeder, [])
                 feeder.open_now(plate)
                 self.store.set("current_plate", plate)
                 self.store.set("lid_manual_open", 1)
                 self.store.set("lid_actual_open", 1)
                 detail = {"mode": mode, "plate": plate}
             elif action == "close":
-                feeder.close()
+                if feeder.close() is False:
+                    # Nothing was sent: the feeder reports no open lid. Say so instead of
+                    # "closed" — the human pressed Close because they can see it open.
+                    event_id = self.store.add_event(
+                        now,
+                        "manual_close_noop",
+                        "feeder reports the lid is already closed; no close command was sent",
+                        {"mode": mode},
+                        self._save_frames("manual_close_noop", self.frames.latest(1)),
+                    )
+                    self._notify(
+                        f"manual close NOT SENT ({mode}): feeder says already closed", event_id
+                    )
+                    return
                 self.store.set("lid_manual_open", None)
                 self.store.set("lid_actual_open", 0)
                 detail = {"mode": mode}
@@ -812,6 +876,7 @@ class Machine:
             "state": self.state,
             "loaded_plates": self.store.loaded_plates(),
             "plates": self.store.plates(),
+            "plates_tried": self.plates_tried(),
             "feeds_this_window": self.store.get_int("feeds_this_window"),
             "last_open_at": self.store.get("last_open_at"),
             "opened_at": self.store.get("opened_at") if self.state == State.FEEDING else None,

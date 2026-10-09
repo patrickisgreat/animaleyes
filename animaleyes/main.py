@@ -53,7 +53,7 @@ class UnavailableFeeder:
     def open_now(self, plate: int) -> None:
         raise FeederError(self.error)
 
-    def close(self) -> None:
+    def close(self) -> bool:
         raise FeederError(self.error)
 
     def manual_feed_active(self) -> bool:
