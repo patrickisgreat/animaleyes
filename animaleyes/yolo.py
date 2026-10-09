@@ -6,9 +6,11 @@ box size (Grrr is tiny, Bowie medium/lanky — at a fixed camera distance the bo
 them). The mapping is a pure function (`verdict_from_detections`) so it is unit-tested without
 loading PyTorch; the model is lazy-imported only when this backend is actually selected.
 
-Enable with IDENTIFIER=yolo (see config). Grrr-vs-Bowie currently uses the size heuristic; a
-fine-tuned classifier on reference crops is the planned upgrade and slots in behind this same
-interface.
+Identity: with YOLO_CLASSIFIER set (a model trained by tools/train_classifier.py on the frames
+the human tagged), each detected animal's crop is classified as grrr / bowie / cat / ..., so a
+dog close to the camera is no longer "Bowie" just because its box is big. Below YOLO_CLS_MIN_CONF
+a dog is "unsure" — which never opens the feeder, and which the cascade hands to Claude. Without
+a classifier the old size heuristic applies (Grrr is tiny, Bowie medium/lanky).
 """
 
 from __future__ import annotations
@@ -47,13 +49,19 @@ class Detection:
     confidence: float
     box_fraction: float  # bbox area / image area, 0..1
     in_bowl_zone: bool = True
+    box: tuple[float, float, float, float] | None = None  # pixels, for the identity crop
+    identity: str | None = None  # classifier's answer for this animal (persona key)
+    identity_conf: float = 0.0
 
 
 @dataclass
 class YoloConfig:
     min_conf: float = 0.4
     # A dog whose box covers at most this fraction of the frame is Grrr (tiny); larger is Bowie.
+    # Only used when no classifier identity is available.
     grrr_max_box_fraction: float = 0.18
+    classifier_path: str = ""  # trained identity model; empty = size heuristic
+    cls_min_conf: float = 0.6  # below this the classifier's answer is "unsure"
 
 
 def verdict_from_detections(dets: list[Detection], cfg: YoloConfig) -> Verdict:
@@ -65,28 +73,30 @@ def verdict_from_detections(dets: list[Detection], cfg: YoloConfig) -> Verdict:
     cats = [d for d in animals if d.label == CAT]
     dogs = [d for d in animals if d.label == DOG]
 
-    present: list[str] = []
-    if cats:
-        present.append("cat")
-    # A dog is Grrr or Bowie by size.
-    dog_identity = None
-    best_dog = max(dogs, key=lambda d: d.confidence) if dogs else None
-    if best_dog is not None:
-        dog_identity = "grrr" if best_dog.box_fraction <= cfg.grrr_max_box_fraction else "bowie"
-        present.append(dog_identity)
+    def who(d: Detection) -> tuple[str, float]:
+        """Identity + confidence for one animal: the classifier's answer when it is sure, else
+        the old size rule for dogs / "cat" for cats. An unsure dog is "unsure", never a guess."""
+        if d.identity is not None:
+            if d.identity_conf >= cfg.cls_min_conf:
+                return d.identity, d.identity_conf
+            return ("cat" if d.label == CAT else "unsure"), d.identity_conf
+        if d.label == CAT:
+            return "cat", d.confidence
+        return ("grrr" if d.box_fraction <= cfg.grrr_max_box_fraction else "bowie"), d.confidence
 
     # Choose the subject: the dog if present (that's who we might feed), else the cat.
-    if best_dog is not None:
-        subject, conf, in_zone = dog_identity, best_dog.confidence, best_dog.in_bowl_zone
-    else:
-        subject, conf, in_zone = "cat", max(c.confidence for c in cats), cats[0].in_bowl_zone
-
+    best_dog = max(dogs, key=lambda d: d.confidence) if dogs else None
+    best = best_dog if best_dog is not None else max(cats, key=lambda d: d.confidence)
+    subject, conf = who(best)
+    present: list[str] = []
+    for d in animals:
+        name, _ = who(d)
+        if name not in present:
+            present.append(name)
     others = [a for a in present if a != subject]
-    reason = (
-        f"yolo: {subject} (conf {conf:.2f}, box {best_dog.box_fraction:.2f})"
-        if best_dog
-        else f"yolo: cat (conf {conf:.2f})"
-    )
+    how = f"id {best.identity_conf:.2f}" if best.identity is not None else "size rule"
+    reason = f"yolo: {subject} (det {best.confidence:.2f}, {how}, box {best.box_fraction:.2f})"
+    in_zone = best.in_bowl_zone
     return Verdict(
         animal=subject,
         confidence=conf,
@@ -99,10 +109,12 @@ def verdict_from_detections(dets: list[Detection], cfg: YoloConfig) -> Verdict:
 class YoloIdentifier:
     """Runs a local YOLO model and maps its detections onto the Identifier interface."""
 
-    def __init__(self, model_path: str, cfg: YoloConfig, model=None):
+    def __init__(self, model_path: str, cfg: YoloConfig, model=None, classifier=None):
         self.cfg = cfg
         self.model_path = model_path
         self._model = model  # injectable for tests; lazy-loaded otherwise
+        self._classifier = classifier
+        self._classifier_path = cfg.classifier_path if classifier is not None else ""
         self.reference_counts: dict[str, int] = {}  # for dashboard parity with Claude
 
     def _ensure_model(self):
@@ -112,6 +124,34 @@ class YoloIdentifier:
             log.info("loading YOLO model %s", self.model_path)
             self._model = YOLO(self.model_path)
         return self._model
+
+    def _ensure_classifier(self):
+        """The identity classifier, or None when none is configured. Reloaded if the configured
+        path changes (a retrain + dashboard edit takes effect without a restart)."""
+        path = self.cfg.classifier_path
+        if not path:
+            return None
+        if self._classifier is None or path != self._classifier_path:
+            from ultralytics import YOLO
+
+            log.info("loading animal classifier %s", path)
+            try:
+                self._classifier = YOLO(path)
+            except Exception as exc:  # noqa: BLE001 - a missing/bad model must not stop feeding
+                log.warning("animal classifier unavailable (%s); using the size rule", exc)
+                self._classifier = None
+                self.cfg.classifier_path = ""
+                return None
+            self._classifier_path = path
+        return self._classifier
+
+    def _identify_crop(self, img, det: Detection) -> None:
+        clf = self._ensure_classifier()
+        if clf is None or det.box is None or det.label not in (DOG, CAT):
+            return
+        r = clf.predict(crop_box(img, det.box), verbose=False, imgsz=224)[0]
+        det.identity = str(r.names[int(r.probs.top1)])
+        det.identity_conf = float(r.probs.top1conf)
 
     def _detect(self, frame: Frame) -> list[Detection]:
         from PIL import Image
@@ -131,10 +171,22 @@ class YoloIdentifier:
                     continue
                 x1, y1, x2, y2 = (float(v) for v in b.xyxy[0])
                 frac = max(0.0, (x2 - x1) * (y2 - y1)) / area
-                dets.append(Detection(label=label, confidence=float(b.conf[0]), box_fraction=frac))
+                det = Detection(
+                    label=label,
+                    confidence=float(b.conf[0]),
+                    box_fraction=frac,
+                    box=(x1, y1, x2, y2),
+                )
+                if det.confidence >= self.cfg.min_conf:
+                    self._identify_crop(img, det)
+                dets.append(det)
         # One line per look, so a missed visit can be explained afterwards: what the gate saw
         # (including detections under YOLO_MIN_CONF, which it then ignores) and how long it took.
-        seen = ", ".join(f"{d.label} {d.confidence:.2f} box {d.box_fraction:.2f}" for d in dets)
+        seen = ", ".join(
+            f"{d.label} {d.confidence:.2f} box {d.box_fraction:.2f}"
+            + (f" -> {d.identity} {d.identity_conf:.2f}" if d.identity else "")
+            for d in dets
+        )
         log.info(
             "yolo saw: %s (%.0f ms, min conf %.2f)", seen or "nothing", took_ms, self.cfg.min_conf
         )

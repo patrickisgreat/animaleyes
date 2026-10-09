@@ -68,3 +68,77 @@ def test_identifier_uses_injected_model_and_frame_size() -> None:
     ident = YoloIdentifier("unused.pt", CFG, model=_FakeModel())
     v = ident.identify([Frame(jpeg=buf.getvalue(), at=datetime.now())])
     assert v.animal == "grrr"
+
+
+def test_classifier_identity_beats_the_size_rule() -> None:
+    """Grrr close to the camera has a big box; with the classifier sure it is her, she is Grrr."""
+    cfg = YoloConfig(min_conf=0.4, grrr_max_box_fraction=0.18, cls_min_conf=0.6)
+    d = Detection("dog", 0.8, box_fraction=0.55, identity="grrr", identity_conf=0.93)
+    v = verdict_from_detections([d], cfg)
+    assert v.animal == "grrr" and v.confidence == 0.93
+    assert "id 0.93" in v.reason
+
+
+def test_unsure_classifier_never_guesses_a_dog() -> None:
+    cfg = YoloConfig(min_conf=0.4, cls_min_conf=0.6)
+    d = Detection("dog", 0.8, box_fraction=0.1, identity="grrr", identity_conf=0.41)
+    v = verdict_from_detections([d], cfg)
+    assert v.animal == "unsure"
+    assert v.is_grrr(0.3, require_at_bowl=False) is False  # unsure can never open the feeder
+
+
+def test_unsure_classifier_on_a_cat_is_still_a_cat() -> None:
+    cfg = YoloConfig(min_conf=0.4, cls_min_conf=0.6)
+    d = Detection("cat", 0.9, box_fraction=0.1, identity="tallulah", identity_conf=0.3)
+    assert verdict_from_detections([d], cfg).animal == "cat"
+
+
+def test_identifier_classifies_each_detected_animals_crop() -> None:
+    """The detector finds the box; the classifier names the animal from its crop."""
+    from datetime import datetime
+
+    from animaleyes.camera import Frame
+    from animaleyes.yolo import YoloIdentifier
+
+    class _Box:
+        def __init__(self, cls, conf, xyxy):
+            self.cls, self.conf, self.xyxy = [cls], [conf], [xyxy]
+
+    class _Res:
+        names = {0: "dog"}
+
+        def __init__(self):
+            self.boxes = [_Box(0, 0.8, [0.0, 0.0, 60.0, 30.0])]
+
+    class _Det:
+        def predict(self, img, verbose=False):
+            return [_Res()]
+
+    class _Probs:
+        top1 = 1
+        top1conf = 0.88
+
+    class _ClsRes:
+        names = {0: "bowie", 1: "grrr"}
+        probs = _Probs()
+
+    class _Cls:
+        def __init__(self):
+            self.crops = []
+
+        def predict(self, img, verbose=False, imgsz=224):
+            self.crops.append(img.size)
+            return [_ClsRes()]
+
+    cfg = YoloConfig(min_conf=0.4, grrr_max_box_fraction=0.18, classifier_path="x.pt")
+    clf = _Cls()
+    ident = YoloIdentifier("m.pt", cfg, model=_Det(), classifier=clf)
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (100, 50), "black").save(buf, format="JPEG")
+    v = ident.identify([Frame(jpeg=buf.getvalue(), at=datetime(2026, 10, 9, 1, 0))])
+    assert v.animal == "grrr" and v.confidence == 0.88
+    assert clf.crops and clf.crops[0][0] <= 100  # it classified a crop, not nothing
