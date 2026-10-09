@@ -56,10 +56,14 @@ def main() -> None:
         and sum(1 for p in d.iterdir() if p.suffix.lower() in IMG_EXT) >= args.min_images
     )
     skipped = sorted(
-        d.name for d in training.iterdir() if d.is_dir() and d.name not in classes and d.name != "unlabeled"
+        d.name
+        for d in training.iterdir()
+        if d.is_dir() and d.name not in classes and d.name != "unlabeled"
     )
     if len(classes) < 2:
-        raise SystemExit(f"need at least two classes with >= {args.min_images} frames; have {classes}")
+        raise SystemExit(
+            f"need at least two classes with >= {args.min_images} frames; have {classes}"
+        )
     print(f"classes: {classes}  (skipped, too few frames: {skipped or 'none'})")
 
     # Crop the animal out of every tagged frame with the same detector + crop used at runtime.
@@ -69,7 +73,11 @@ def main() -> None:
         frames = sorted(p for p in (training / cls).iterdir() if p.suffix.lower() in IMG_EXT)
         for p in frames:
             # Deterministic split by filename hash, so re-runs hold out the same frames.
-            split = "val" if int(hashlib.md5(p.name.encode()).hexdigest(), 16) % 100 < args.val_fraction * 100 else "train"
+            split = (
+                "val"
+                if int(hashlib.md5(p.name.encode()).hexdigest(), 16) % 100 < args.val_fraction * 100
+                else "train"
+            )
             img = Image.open(p).convert("RGB")
             res = detector.predict(img, verbose=False, conf=0.25)[0]
             boxes = [
@@ -88,7 +96,10 @@ def main() -> None:
             counts[cls][split] += 1
     for cls in classes:
         c = counts[cls]
-        print(f"  {cls:10s} train {c['train']:4d}  val {c['val']:4d}  no animal found {c['no_animal_found']:3d}")
+        print(
+            f"  {cls:10s} train {c['train']:4d}  val {c['val']:4d}  "
+            f"no animal found {c['no_animal_found']:3d}"
+        )
 
     model = YOLO(args.base)
     model.train(
@@ -96,14 +107,14 @@ def main() -> None:
         epochs=args.epochs,
         imgsz=args.imgsz,
         device="cpu",
-        project=str(out),
+        project=str(out.resolve()),  # absolute, or ultralytics nests it under runs/classify/
         name="cls-run",
         exist_ok=True,
         verbose=False,
         plots=False,
         workers=2,
     )
-    best = out / "cls-run" / "weights" / "best.pt"
+    best = Path(model.trainer.save_dir) / "weights" / "best.pt"
     final = out / "animals-cls.pt"
     shutil.copy(best, final)
 

@@ -206,6 +206,7 @@ def test_lingering_cat_writes_frames_only_for_logged_events(h: Harness) -> None:
 
 
 def test_done_still_logs_the_cat(h: Harness) -> None:
+    h.config.update({"FEED_WITHOUT_LOADED_PLATES": False})  # classic: nothing marked = done
     h.tick(motion=False)
     assert h.state() == "DONE"
     h.llm.identify_result = CAT
@@ -249,6 +250,7 @@ def test_feed_failure_notifies_and_returns_to_idle_without_retry(h: Harness) -> 
 
 
 def test_done_reports_hungry_grrr_once_per_hour(h: Harness) -> None:
+    h.config.update({"FEED_WITHOUT_LOADED_PLATES": False})  # classic: nothing marked = done
     h.tick(motion=False)
     assert h.state() == "DONE"
     h.llm.identify_result = GRRR
@@ -263,6 +265,7 @@ def test_done_reports_hungry_grrr_once_per_hour(h: Harness) -> None:
 
 
 def test_setting_plates_from_dashboard_leaves_done(h: Harness) -> None:
+    h.config.update({"FEED_WITHOUT_LOADED_PLATES": False})  # classic: nothing marked = done
     h.tick(motion=False)
     assert h.state() == "DONE"
     h.store.set_plate(3, "loaded", h.clock.now)
@@ -671,3 +674,48 @@ def test_eating_during_plate_verification_counts_as_presence(h: Harness) -> None
     h.llm.feeding_result = GONE_EMPTY
     h.run(seconds=40)  # 110s after opening: past LEAVE_TIMEOUT from open, not from last seen
     assert h.state() == "FEEDING"
+
+
+def test_feeds_from_the_bowl_under_the_lid_when_nothing_is_marked(h: Harness) -> None:
+    """Forgot to tick a bowl: Grrr confirmed still opens whatever is under the lid."""
+    assert h.store.loaded_plates() == []
+    h.feeder.plate = 2
+    confirm_grrr(h)
+    assert h.feeder.opens == ["open:2"]
+    assert h.machine.plates_tried() == [2]
+    assert h.state() == "FEEDING"
+
+
+def test_untried_bowls_are_tried_in_turn_until_all_are_empty(h: Harness) -> None:
+    """Nothing marked and every bowl verified empty: rotate through all three once, then alert
+    and finish for the window instead of churning the tray all night."""
+    h.config.update({"VERIFY_FOOD": True, "MAX_ROTATE_FOR_FOOD": 2})
+    h.llm.verify_result = NO_FOOD
+    confirm_grrr(h)  # the tray starts on bowl 1
+    h.run(seconds=90)
+    assert h.feeder.opens == ["open:1", "open:2", "open:3"]
+    assert sorted(h.machine.plates_tried()) == [1, 2, 3]
+    assert h.events("empty_no_food")
+    h.clock.advance(minutes=61)
+    h.tick(motion=False)
+    assert h.state() == "DONE"  # every bowl tried this window
+
+
+def test_marked_bowls_are_honoured_exactly(h: Harness) -> None:
+    """Marks from the dashboard win: once the marked bowl is eaten, no other bowl is tried."""
+    h.load_plates(1)
+    confirm_grrr(h)
+    h.llm.feeding_result = GONE_EMPTY
+    h.run(seconds=h.machine.settings.LEAVE_TIMEOUT_S + 30)
+    h.clock.advance(minutes=61)
+    h.tick(motion=False)
+    assert h.state() == "DONE"
+    assert h.feeder.opens == ["open:1"]
+
+
+def test_a_new_window_forgets_which_bowls_were_tried(h: Harness) -> None:
+    h.store.set("plates_tried", "[1, 2, 3]")
+    h.store.set("state", "OUTSIDE_WINDOW")
+    h.tick(motion=False)  # 22:00 is inside the window -> IDLE, with the slate wiped
+    assert h.state() == "IDLE"
+    assert h.machine.plates_tried() == []

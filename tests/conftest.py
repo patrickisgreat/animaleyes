@@ -148,8 +148,10 @@ class Harness:
         )
 
     def load_plates(self, *plates: int) -> None:
+        """What marking bowls from the dashboard does: the marks are honoured as given."""
         for plate in plates:
             self.store.set_plate(plate, "loaded", self.clock.now)
+        self.store.set("plates_marked", "1")
 
     def push_frame(self) -> None:
         self.frames.push(Frame(jpeg=TINY_JPEG, at=self.clock.now))

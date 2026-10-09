@@ -26,6 +26,11 @@ class Settings:
     ACTIVE_START: str = "21:00"
     ACTIVE_END: str = "06:00"
     MIN_GAP_MIN: int = 60
+    # If nobody marked a bowl as loaded for this window, still feed: when Grrr is confirmed,
+    # open whatever bowl is under the lid, check it for food (VERIFY_FOOD), and move on to the
+    # next untried bowl if it's empty, until every bowl has been tried once. Bowls marked from
+    # the dashboard are still honoured exactly as marked.
+    FEED_WITHOUT_LOADED_PLATES: bool = True
     LEAVE_TIMEOUT_S: int = 120
     FEEDING_MAX_MIN: int = 15
     FEEDING_POLL_S: int = 20

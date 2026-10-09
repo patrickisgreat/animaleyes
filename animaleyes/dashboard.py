@@ -206,6 +206,7 @@ def create_app(
             "in_window": settings.is_active_at(now.time()),
             "plates": store.plates(),
             "loaded_plates": store.loaded_plates(),
+            "plates_tried": machine.plates_tried(),
             "feeds_this_window": store.get_int("feeds_this_window"),
             "last_open_at": store.get("last_open_at"),
             "motion_source": settings.MOTION_SOURCE,

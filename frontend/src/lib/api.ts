@@ -16,6 +16,7 @@ export type Status = {
   in_window: boolean;
   plates: Record<string, string>;
   loaded_plates: number[];
+  plates_tried: number[];
   feeds_this_window: number;
   last_open_at: string | null;
   lid_open: boolean;
