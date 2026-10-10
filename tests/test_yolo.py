@@ -142,3 +142,75 @@ def test_identifier_classifies_each_detected_animals_crop() -> None:
     v = ident.identify([Frame(jpeg=buf.getvalue(), at=datetime(2026, 10, 9, 1, 0))])
     assert v.animal == "grrr" and v.confidence == 0.88
     assert clf.crops and clf.crops[0][0] <= 100  # it classified a crop, not nothing
+
+
+def _frame_1000() -> Frame:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (1000, 1000)).save(buf, format="JPEG")
+    return Frame(jpeg=buf.getvalue(), at=datetime.now())
+
+
+def test_settings_are_reread_on_every_look() -> None:
+    """Dashboard edits take effect on the next tick, no restart: here the threshold moves above
+    the detection and back."""
+    live = {"min_conf": 0.4}
+    ident = YoloIdentifier(
+        "unused.pt",
+        CFG,
+        model=_FakeModel(),
+        settings=lambda: YoloConfig(min_conf=live["min_conf"], grrr_max_box_fraction=0.18),
+    )
+    assert ident.identify([_frame_1000()]).animal == "grrr"
+    live["min_conf"] = 0.95  # the fake dog is 0.9
+    assert ident.identify([_frame_1000()]).animal == "none"
+    live["min_conf"] = 0.4
+    assert ident.identify([_frame_1000()]).animal == "grrr"
+
+
+def test_classifier_path_set_later_is_loaded_and_a_bad_one_is_tried_once() -> None:
+    """Enabling the identity model from Settings after startup loads it; a path that fails to
+    load falls back to the size rule and is not retried every tick."""
+
+    class _Probs:
+        top1 = 0
+        top1conf = 0.99
+
+    class _ClsRes:
+        names = {0: "bowie"}
+        probs = _Probs()
+
+    class _Cls:
+        def predict(self, img, verbose=False, imgsz=224):
+            return [_ClsRes()]
+
+    live = {"path": ""}
+    loads: list[str] = []
+    ident = YoloIdentifier(
+        "unused.pt",
+        CFG,
+        model=_FakeModel(),
+        settings=lambda: YoloConfig(
+            min_conf=0.4, grrr_max_box_fraction=0.18, classifier_path=live["path"]
+        ),
+    )
+
+    def fake_load(path: str):
+        loads.append(path)
+        if path == "broken.pt":
+            raise OSError("no such file")
+        return _Cls()
+
+    ident._load_classifier = fake_load  # type: ignore[method-assign]
+    assert ident.identify([_frame_1000()]).animal == "grrr"  # size rule: tiny box
+    live["path"] = "broken.pt"
+    assert ident.identify([_frame_1000()]).animal == "grrr"  # fell back to the size rule
+    assert ident.identify([_frame_1000()]).animal == "grrr"
+    assert loads == ["broken.pt"]  # warned once, not retried
+    live["path"] = "good.pt"
+    assert ident.identify([_frame_1000()]).animal == "bowie"  # classifier wins over size
+    assert ident.identify([_frame_1000()]).animal == "bowie"
+    assert loads == ["broken.pt", "good.pt"]  # loaded once, reused

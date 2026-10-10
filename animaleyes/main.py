@@ -63,16 +63,18 @@ class UnavailableFeeder:
 def _yolo(config: ConfigStore):
     from .yolo import YoloConfig, YoloIdentifier
 
-    s = config.load()
-    return YoloIdentifier(
-        s.YOLO_MODEL,
-        YoloConfig(
+    def settings() -> YoloConfig:
+        s = config.load()
+        return YoloConfig(
             min_conf=s.YOLO_MIN_CONF,
             grrr_max_box_fraction=s.GRRR_MAX_BOX_FRACTION,
             classifier_path=s.YOLO_CLASSIFIER,
             cls_min_conf=s.YOLO_CLS_MIN_CONF,
-        ),
-    )
+        )
+
+    # settings= makes dashboard edits live; without it the knobs were frozen at startup and
+    # enabling a classifier silently needed a restart.
+    return YoloIdentifier(config.load().YOLO_MODEL, settings(), settings=settings)
 
 
 def _claude(config: ConfigStore, store: Store, personas: PersonaStore):
