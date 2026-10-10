@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .camera import Frame
@@ -109,13 +110,28 @@ def verdict_from_detections(dets: list[Detection], cfg: YoloConfig) -> Verdict:
 class YoloIdentifier:
     """Runs a local YOLO model and maps its detections onto the Identifier interface."""
 
-    def __init__(self, model_path: str, cfg: YoloConfig, model=None, classifier=None):
+    def __init__(
+        self,
+        model_path: str,
+        cfg: YoloConfig,
+        model=None,
+        classifier=None,
+        settings: Callable[[], YoloConfig] | None = None,
+    ):
         self.cfg = cfg
         self.model_path = model_path
         self._model = model  # injectable for tests; lazy-loaded otherwise
         self._classifier = classifier
         self._classifier_path = cfg.classifier_path if classifier is not None else ""
+        self._bad_classifier_path = ""  # a path that failed to load: warned once, not retried
+        # Re-read before every look so dashboard edits (thresholds, the classifier path after a
+        # retrain) take effect on the next tick, like every other knob. A fixed cfg is for tests.
+        self._settings = settings
         self.reference_counts: dict[str, int] = {}  # for dashboard parity with Claude
+
+    def _refresh(self) -> None:
+        if self._settings is not None:
+            self.cfg = self._settings()
 
     def _ensure_model(self):
         if self._model is None:
@@ -129,21 +145,24 @@ class YoloIdentifier:
         """The identity classifier, or None when none is configured. Reloaded if the configured
         path changes (a retrain + dashboard edit takes effect without a restart)."""
         path = self.cfg.classifier_path
-        if not path:
+        if not path or path == self._bad_classifier_path:
             return None
         if self._classifier is None or path != self._classifier_path:
-            from ultralytics import YOLO
-
             log.info("loading animal classifier %s", path)
             try:
-                self._classifier = YOLO(path)
+                self._classifier = self._load_classifier(path)
             except Exception as exc:  # noqa: BLE001 - a missing/bad model must not stop feeding
                 log.warning("animal classifier unavailable (%s); using the size rule", exc)
                 self._classifier = None
-                self.cfg.classifier_path = ""
+                self._bad_classifier_path = path
                 return None
             self._classifier_path = path
         return self._classifier
+
+    def _load_classifier(self, path: str):
+        from ultralytics import YOLO
+
+        return YOLO(path)
 
     def _identify_crop(self, img, det: Detection) -> None:
         clf = self._ensure_classifier()
@@ -156,6 +175,7 @@ class YoloIdentifier:
     def _detect(self, frame: Frame) -> list[Detection]:
         from PIL import Image
 
+        self._refresh()
         img = Image.open(io.BytesIO(frame.jpeg)).convert("RGB")
         w, h = img.size
         area = float(w * h) or 1.0
